@@ -1,0 +1,102 @@
+params:
+  seed: 42
+
+  env:
+    clip_observations: 10.0
+    clip_actions: 1.0
+
+  algo:
+    name: a2c_continuous
+
+  model:
+    name: continuous_a2c_logstd
+
+  network:
+    name: actor_critic
+    separate: False
+    space:
+      continuous:
+        mu_activation: None
+        sigma_activation: None
+        mu_init:
+          name: default
+        sigma_init:
+          name: const_initializer
+          val: 0
+        fixed_sigma: True
+    mlp:
+      units: [1024, 1024, 512, 512]
+      activation: elu
+      d2rl: False
+      initializer:
+        name: default
+      regularizer:
+        name: None
+
+  load_checkpoint: False
+  load_path: ''
+
+  config:
+    name: SimToolRealSharpaPPO
+    env_name: rlgpu
+    device: 'cuda:0'
+    device_name: 'cuda:0'
+    multi_gpu: False
+    ppo: True
+    mixed_precision: True
+    normalize_input: True
+    normalize_value: True
+    normalize_advantage: True
+    value_bootstrap: False
+    reward_shaper:
+      scale_value: 0.01
+    num_actors: -1
+    gamma: 0.99
+    tau: 0.95
+    learning_rate: 1e-4
+    lr_schedule: adaptive
+    schedule_type: standard
+    kl_threshold: 0.016
+    score_to_win: 1000000
+    max_epochs: 1000000
+    max_frames: 100000000000000
+    save_best_after: 100
+    save_frequency: 3000
+    print_stats: True
+    grad_norm: 1.0
+    entropy_coef: 0.0
+    truncate_grads: True
+    e_clip: 0.1
+    horizon_length: 16
+    minibatch_size: 32768
+    mini_epochs: 4
+    critic_coef: 4.0
+    clip_value: True
+    seq_length: 16
+    bounds_loss_coef: 0.0001
+
+    # Custom SAPO / mixed-exploration knobs from the reference rl_games fork.
+    use_others_experience: 'none'
+    off_policy_ratio: 1.0
+    expl_type: 'none'
+    expl_reward_coef_embd_size: 32
+    expl_reward_coef_scale: 1.0
+    expl_reward_type: rnd
+    expl_coef_block_size: 4096
+
+    player:
+      deterministic: False
+      games_num: 100000
+      print_stats: False
+
+wandb_activate: False
+wandb_group: 'rl_gpu'
+wandb_name: 'simtoolreal_sharpa'
+wandb_entity: ''
+wandb_project: 'simtoolreal'
+wandb_tags: []
+
+hydra:
+  output_subdir: null
+  run:
+    dir: .

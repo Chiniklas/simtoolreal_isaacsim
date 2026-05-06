@@ -1,35 +1,15 @@
-from setuptools import setup, find_packages
+"""SimToolReal Isaac Lab package setuptools."""
 
-# Minimum dependencies required prior to installation
-INSTALL_REQUIRES = [
-    # RL
-    "gym==0.23.1",
-    "torch",
-    "omegaconf",
-    "termcolor",
-    "jinja2",
-    "hydra-core>=1.2",
-    "rl-games>=1.6.0",
-    "pyvirtualdisplay",
-    "urdfpy==0.0.22",
-    "pysdf==0.1.9",
-    "warp-lang==0.10.1",
-    "trimesh==3.23.5",
-]
+from setuptools import find_packages, setup
 
-# Installation operation
 setup(
-    name="simtoolreal",
+    name="simtoolreal_lab",
     version="0.1.0",
-    author="Tyler Lum, Kushal Kedia",
-    author_email="tylergwlum@gmail.com, kk837@cornell.edu",
-    url="https://github.com/tylerlum/simtoolreal",
-    description="Official implementation of SimToolReal: An Object-Centric Policy for Zero-Shot Dexterous Tool Manipulation",
-    keywords=["robotics", "rl", "dexterous manipulation"],
+    description="Isaac Lab transfer of SimToolReal KUKA-SHARPA environments.",
+    packages=find_packages(exclude=("tests",)),
     include_package_data=True,
-    python_requires=">=3.6",
-    install_requires=INSTALL_REQUIRES,
-    packages=find_packages(),
-    classifiers=["Natural Language :: English", "Programming Language :: Python :: 3.6, 3.7, 3.8"],
-    zip_safe=False,
+    package_data={
+        "simtoolreal_lab.tasks.simtoolreal_sharpa.agents": ["*.yaml"],
+    },
+    install_requires=[],
 )
