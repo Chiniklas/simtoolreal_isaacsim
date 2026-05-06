@@ -40,12 +40,6 @@ cd /home/chi-zhang/projects/simtoolreal_isaacsim
 Install the local package:
 
 ```bash
-./install.sh
-```
-
-This is equivalent to:
-
-```bash
 python -m pip install -e .
 ```
 

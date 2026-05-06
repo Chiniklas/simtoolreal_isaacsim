@@ -37,7 +37,7 @@ params:
   load_path: ''
 
   config:
-    name: SimToolRealSharpaPPO
+    name: SimToolRealSharpaSAPO
     env_name: rlgpu
     device: 'cuda:0'
     device_name: 'cuda:0'

@@ -13,6 +13,6 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": SimToolRealSharpaEnvCfg,
-        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_sapo_cfg.yaml",
     },
 )
