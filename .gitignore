@@ -1,46 +1,48 @@
-*egg-info
-__pycache__
-*.pyc
+# Python/package artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editor and local assistant state
 *.swp
-logs
-*.npy
-.thumbs/
+.agents/
+.codex/
 
-runs/
-# pretrained_ckpts/
-wandb/
-outputs/
+# Training/evaluation outputs
+/logs/
+/outputs/
+/runs/
+/wandb/
+/eval_results/
+simtoolreal_lab/tasks/simtoolreal_sharpa/logs/
 
-# Isaac Lab generates USD files from the tracked KUKA-SHARPA URDF.
+# Local downloaded policies/checkpoints
+simtoolreal_lab/pretrained_policy/
+reference/pretrained_policy/
+*.pth
+
+# Isaac Lab/Sim generated assets from tracked source URDFs
 simtoolreal_lab/assets/kuka_sharpa/**/*.usd
 
-background_imgs/
-dome_light_textures/
-object_textures/
-table_textures/
-curated_table_textures/
-eval_results/
-dextrah_lab/assets/*
-!dextrah_lab/assets/kuka_inspirehand/
-!dextrah_lab/assets/kuka_inspirehand/**
-!dextrah_lab/assets/kuka_inspirehand_modified/
-!dextrah_lab/assets/kuka_inspirehand_modified/**
-!dextrah_lab/assets/tg2_inspirehand/
-!dextrah_lab/assets/tg2_inspirehand/**
-reference/
-# dextrah_lab/stored_policies/
-build/
-devel/
-.catkin_workspace
-teacher_eval
-offline_replay_logs
-student_replay_logs
-temp
-traj_env_*
-teacher_replay_results.yaml
-.codex
+# Generated data/caches
+*.npy
+.thumbs/
+/temp/
+/traj_env_*/
+/teacher_eval/
+/offline_replay_logs/
+/student_replay_logs/
+/teacher_replay_results.yaml
 
-build/
-install/
-log/
-visdex_objects/
+# Local reference checkout/data kept out of this port package
+/reference/
+
+# Build/install outputs
+/build/
+/devel/
+/install/
+/log/
+.catkin_workspace
