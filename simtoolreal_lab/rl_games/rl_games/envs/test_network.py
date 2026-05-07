@@ -38,7 +38,7 @@ class TestNet(nn.Module):
         return action, value, None
 
 
-from reference.rl_games.rl_games.algos_torch.network_builder import NetworkBuilder
+from rl_games.algos_torch.network_builder import NetworkBuilder
 
 class TestNetBuilder(NetworkBuilder):
     def __init__(self, **kwargs):

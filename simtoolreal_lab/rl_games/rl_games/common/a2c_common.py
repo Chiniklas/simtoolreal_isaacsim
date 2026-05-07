@@ -3,18 +3,18 @@ import math
 import os
 from omegaconf import DictConfig
 
-from reference.rl_games.rl_games.common import vecenv
+from rl_games.common import vecenv
 
-from reference.rl_games.rl_games.algos_torch.moving_mean_std import GeneralizedMovingStats
-from reference.rl_games.rl_games.algos_torch.self_play_manager import SelfPlayManager
-from reference.rl_games.rl_games.algos_torch import torch_ext
-from reference.rl_games.rl_games.common import schedulers
-from reference.rl_games.rl_games.common.custom_utils import create_sinusoidal_encoding, filter_leader, shuffle_batch, swap_and_flatten01
-from reference.rl_games.rl_games.common.experience import ExperienceBuffer
-from reference.rl_games.rl_games.common.interval_summary_writer import IntervalSummaryWriter
-from reference.rl_games.rl_games.common.diagnostics import DefaultDiagnostics, PpoDiagnostics
-from reference.rl_games.rl_games.algos_torch import  model_builder
-from reference.rl_games.rl_games.interfaces.base_algorithm import  BaseAlgorithm
+from rl_games.algos_torch.moving_mean_std import GeneralizedMovingStats
+from rl_games.algos_torch.self_play_manager import SelfPlayManager
+from rl_games.algos_torch import torch_ext
+from rl_games.common import schedulers
+from rl_games.common.custom_utils import create_sinusoidal_encoding, filter_leader, shuffle_batch, swap_and_flatten01
+from rl_games.common.experience import ExperienceBuffer
+from rl_games.common.interval_summary_writer import IntervalSummaryWriter
+from rl_games.common.diagnostics import DefaultDiagnostics, PpoDiagnostics
+from rl_games.algos_torch import  model_builder
+from rl_games.interfaces.base_algorithm import  BaseAlgorithm
 import numpy as np
 import time
 import gym
@@ -26,7 +26,7 @@ import torch.distributed as dist
  
 from time import sleep
 
-from reference.rl_games.rl_games.common import common_losses
+from rl_games.common import common_losses
 
 def rescale_actions(low, high, action):
     d = (high - low) / 2.0

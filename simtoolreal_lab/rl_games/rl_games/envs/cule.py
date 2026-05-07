@@ -1,4 +1,4 @@
-from reference.rl_games.rl_games.common.ivecenv import IVecEnv
+from rl_games.common.ivecenv import IVecEnv
 import gym
 import torch
 import numpy as np

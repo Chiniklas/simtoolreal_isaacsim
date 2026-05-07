@@ -6,15 +6,15 @@ import threading
 import time
 import gym
 import numpy as np
-from reference.rl_games.rl_games.algos_torch import model_builder
-from reference.rl_games.rl_games.common.custom_utils import create_sinusoidal_encoding
+from rl_games.algos_torch import model_builder
+from rl_games.common.custom_utils import create_sinusoidal_encoding
 import torch
 import copy
 from os.path import basename
 from typing import Optional
-from reference.rl_games.rl_games.common import vecenv
-from reference.rl_games.rl_games.common import env_configurations
-from reference.rl_games.rl_games.algos_torch import torch_ext
+from rl_games.common import vecenv
+from rl_games.common import env_configurations
+from rl_games.algos_torch import torch_ext
 
 
 class BasePlayer(object):

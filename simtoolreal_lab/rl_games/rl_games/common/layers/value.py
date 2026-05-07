@@ -1,8 +1,8 @@
 import torch
 from torch import nn
-from reference.rl_games.rl_games.common import common_losses
-from reference.rl_games.rl_games.algos_torch.layers import symexp, symlog
-from reference.rl_games.rl_games.common.extensions.distributions import TwoHotDist
+from rl_games.common import common_losses
+from rl_games.algos_torch.layers import symexp, symlog
+from rl_games.common.extensions.distributions import TwoHotDist
 
 
 class DefaultValue(nn.Module):

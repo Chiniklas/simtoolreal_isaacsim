@@ -2,10 +2,10 @@ import gym
 import numpy as np
 from pettingzoo.sisl import multiwalker_v6
 import yaml
-from reference.rl_games.rl_games.torch_runner import Runner
+from rl_games.torch_runner import Runner
 import os
 from collections import deque
-import reference.rl_games.rl_games.envs.connect4_network
+import rl_games.envs.connect4_network
 
 class MultiWalker(gym.Env):
     def __init__(self, name="multiwalker",  **kwargs):

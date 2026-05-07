@@ -63,7 +63,7 @@ class SimToolRealSharpaEnvCfg(DirectRLEnvCfg):
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.82, 0.56, 0.35)),
             physics_material=RigidBodyMaterialCfg(static_friction=0.5, dynamic_friction=0.5),
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.15), rot=(1.0, 0.0, 0.0, 0.0)),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.38), rot=(1.0, 0.0, 0.0, 0.0)),
     )
     object_cfg: RigidObjectCfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/object",
@@ -84,7 +84,7 @@ class SimToolRealSharpaEnvCfg(DirectRLEnvCfg):
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.1, 0.35, 0.9)),
             physics_material=RigidBodyMaterialCfg(static_friction=0.5, dynamic_friction=0.5),
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.34), rot=(1.0, 0.0, 0.0, 0.0)),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.63), rot=(1.0, 0.0, 0.0, 0.0)),
     )
 
     # reset/control
@@ -102,7 +102,8 @@ class SimToolRealSharpaEnvCfg(DirectRLEnvCfg):
     randomize_object_rotation = True
 
     # reference task geometry
-    table_top_z = 0.3
+    table_top_z = 0.53
+    table_object_z_offset = 0.25
     object_base_size = 0.04
     object_scales = (1.0, 1.0, 1.0)
     keypoint_scale = 1.5

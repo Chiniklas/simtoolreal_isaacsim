@@ -23,7 +23,7 @@ params:
         sigma_init:
           name: const_initializer
           val: 0
-        fixed_sigma: True
+        fixed_sigma: coef_cond
     mlp:
       units: [1024, 1024, 512, 512]
       activation: elu
@@ -32,12 +32,18 @@ params:
         name: default
       regularizer:
         name: None
+    rnn:
+      name: lstm
+      units: 1024
+      layers: 1
+      before_mlp: True
+      layer_norm: True
 
   load_checkpoint: False
   load_path: ''
 
   config:
-    name: SimToolRealSharpaSAPO
+    name: SimToolRealLSTMAsymmetricPPO
     env_name: rlgpu
     device: 'cuda:0'
     device_name: 'cuda:0'
@@ -68,26 +74,46 @@ params:
     truncate_grads: True
     e_clip: 0.1
     horizon_length: 16
-    minibatch_size: 32768
-    mini_epochs: 4
+    minibatch_size: 98304
+    mini_epochs: 2
     critic_coef: 4.0
     clip_value: True
     seq_length: 16
     bounds_loss_coef: 0.0001
 
     # Custom SAPO / mixed-exploration knobs from the reference rl_games fork.
-    use_others_experience: 'none'
+    use_others_experience: lf
     off_policy_ratio: 1.0
-    expl_type: 'none'
+    expl_type: mixed_expl_learn_param
     expl_reward_coef_embd_size: 32
-    expl_reward_coef_scale: 1.0
-    expl_reward_type: rnd
+    expl_reward_coef_scale: 0.005
+    expl_reward_type: entropy
     expl_coef_block_size: 4096
 
     player:
       deterministic: False
       games_num: 100000
       print_stats: False
+
+    central_value_config:
+      minibatch_size: 98304
+      mini_epochs: 2
+      learning_rate: 1e-4
+      kl_threshold: 0.016
+      clip_value: True
+      normalize_input: True
+      truncate_grads: True
+      network:
+        name: actor_critic
+        central_value: True
+        mlp:
+          units: [1024, 1024, 512, 512]
+          activation: elu
+          d2rl: False
+          initializer:
+            name: default
+          regularizer:
+            name: None
 
 wandb_activate: False
 wandb_group: 'rl_gpu'

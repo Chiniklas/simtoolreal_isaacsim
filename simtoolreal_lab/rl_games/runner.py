@@ -39,7 +39,7 @@ if __name__ == '__main__':
             config['params']['seed'] = args['seed']
             config['params']['config']['env_config']['seed'] = args['seed']
 
-        from reference.rl_games.rl_games.torch_runner import Runner
+        from rl_games.torch_runner import Runner
 
         try:
             import ray

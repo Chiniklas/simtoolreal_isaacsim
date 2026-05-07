@@ -81,7 +81,7 @@ class ConnectNet(nn.Module):
         return s
 
 
-from reference.rl_games.rl_games.algos_torch.network_builder import NetworkBuilder
+from rl_games.algos_torch.network_builder import NetworkBuilder
 
 class ConnectBuilder(NetworkBuilder):
     def __init__(self, **kwargs):

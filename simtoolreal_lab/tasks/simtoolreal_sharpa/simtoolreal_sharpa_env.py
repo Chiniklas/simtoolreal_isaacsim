@@ -165,7 +165,7 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         z_noise = sample_uniform(-self.cfg.reset_position_noise_z, self.cfg.reset_position_noise_z, (num_ids,), self.device)
         object_state[:, 0] = xy_noise[:, 0]
         object_state[:, 1] = xy_noise[:, 1]
-        object_state[:, 2] = self.cfg.table_top_z + self.cfg.object_base_size * 0.5 + z_noise
+        object_state[:, 2] = self.cfg.table_cfg.init_state.pos[2] + self.cfg.table_object_z_offset + z_noise
         object_state[:, 0:3] += self.scene.env_origins[env_ids]
         object_state[:, 3:7] = self._sample_object_quat(num_ids)
         object_state[:, 7:13] = 0.0

@@ -1,4 +1,4 @@
-from reference.rl_games.rl_games.common.ivecenv import IVecEnv
+from rl_games.common.ivecenv import IVecEnv
 import gym
 import numpy as np
 import torch.utils.dlpack as tpack
@@ -18,7 +18,7 @@ def torch_to_jax(tensor):
 
 class BraxEnv(IVecEnv):
     def __init__(self, config_name, num_actors, **kwargs):
-        from reference.rl_games.rl_games.envs.brax import envs
+        from rl_games.envs.brax import envs
         import jax.numpy as jnp
 
         self.batch_size = num_actors

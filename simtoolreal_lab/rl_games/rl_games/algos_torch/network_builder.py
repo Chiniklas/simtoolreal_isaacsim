@@ -1,13 +1,13 @@
-from reference.rl_games.rl_games.common import object_factory
-from reference.rl_games.rl_games.algos_torch import torch_ext
+from rl_games.common import object_factory
+from rl_games.algos_torch import torch_ext
 
 import torch
 import torch.nn as nn
 
-from reference.rl_games.rl_games.algos_torch.d2rl import D2RLNet
-from reference.rl_games.rl_games.algos_torch.sac_helper import  SquashedNormal
-from reference.rl_games.rl_games.common.layers.recurrent import  GRUWithDones, LSTMWithDones
-from reference.rl_games.rl_games.common.layers.value import  TwoHotEncodedValue, DefaultValue
+from rl_games.algos_torch.d2rl import D2RLNet
+from rl_games.algos_torch.sac_helper import  SquashedNormal
+from rl_games.common.layers.recurrent import  GRUWithDones, LSTMWithDones
+from rl_games.common.layers.value import  TwoHotEncodedValue, DefaultValue
 
 
 def _create_initializer(func, **kwargs):

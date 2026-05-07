@@ -2,7 +2,7 @@ import gym
 import numpy as np
 from pettingzoo.classic import connect_four_v0
 import yaml
-from reference.rl_games.rl_games.torch_runner import Runner
+from rl_games.torch_runner import Runner
 import os
 from collections import deque
 

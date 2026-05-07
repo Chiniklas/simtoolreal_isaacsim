@@ -28,6 +28,7 @@ import gymnasium as gym
 import torch
 from rl_games.common import env_configurations, vecenv
 from rl_games.common.player import BasePlayer
+from rl_games.algos_torch import torch_ext
 from rl_games.torch_runner import Runner
 
 import isaaclab_tasks  # noqa: F401
@@ -36,6 +37,28 @@ from isaaclab_tasks.utils import load_cfg_from_registry, parse_env_cfg
 from isaaclab_rl.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper
 
 import simtoolreal_lab.tasks.simtoolreal_sharpa.gym_setup  # noqa: F401
+
+
+def _player_obs(obs: torch.Tensor | dict[str, torch.Tensor], player: BasePlayer) -> torch.Tensor:
+    """Convert Isaac Lab RL-Games observations to the tensor expected by RL-Games players."""
+    if isinstance(obs, dict):
+        obs = obs["obs"]
+    if obs.dim() == 3 and obs.shape[0] == 1:
+        obs = obs.squeeze(0)
+    if player.intr_reward_coef_embd is not None:
+        obs = torch.cat([obs, player.intr_reward_coef_embd], dim=1)
+    return obs
+
+
+def _restore_policy_only(player: BasePlayer, checkpoint_path: str) -> None:
+    """Restore network weights without replaying reference IsaacGym env state."""
+    checkpoint = torch_ext.load_checkpoint(checkpoint_path)
+    if 0 in checkpoint:
+        checkpoint = checkpoint[0]
+    player.model.load_state_dict(checkpoint["model"])
+    if player.normalize_input and "running_mean_std" in checkpoint:
+        player.model.running_mean_std.load_state_dict(checkpoint["running_mean_std"])
+    player.loaded_checkpoint = checkpoint_path
 
 
 def main():
@@ -57,13 +80,15 @@ def main():
     runner = Runner()
     runner.load(agent_cfg)
     player: BasePlayer = runner.create_player()
-    player.restore(resume_path)
+    _restore_policy_only(player, resume_path)
     player.reset()
+    player.has_batch_dimension = True
+    player.batch_size = env.num_envs
 
     obs = env.reset()
     with torch.inference_mode():
         while simulation_app.is_running():
-            action = player.get_action(obs, is_deterministic=True)
+            action = player.get_action(_player_obs(obs, player), is_deterministic=True)
             obs, _, done, _ = env.step(action)
             if done.any():
                 obs = env.reset()

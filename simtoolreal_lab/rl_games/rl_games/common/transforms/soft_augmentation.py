@@ -1,4 +1,4 @@
-from reference.rl_games.rl_games.common.transforms import transforms
+from rl_games.common.transforms import transforms
 import torch
 
 class SoftAugmentation():

@@ -83,8 +83,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env_cfg.sim.device = f"cuda:{app_launcher.local_rank}"
 
     env_cfg.seed = agent_cfg["params"]["seed"]
-    log_root_path = os.path.abspath(os.path.join("logs", "rl_games", agent_cfg["params"]["config"]["name"]))
-    log_dir = agent_cfg["params"]["config"].get("full_experiment_name", datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
+    task_log_root = pathlib.Path(__file__).resolve().parent / "tasks" / "simtoolreal_sharpa" / "logs" / "rl_games"
+    log_root_path = str((task_log_root / agent_cfg["params"]["config"]["name"]).resolve())
+    # The reference SAPO RL-Games fork parses the leading token as policy_idx.
+    log_dir = agent_cfg["params"]["config"].get("full_experiment_name", f"0_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}")
     agent_cfg["params"]["config"]["train_dir"] = log_root_path
     agent_cfg["params"]["config"]["full_experiment_name"] = log_dir
     dump_yaml(os.path.join(log_root_path, log_dir, "params", "env.yaml"), env_cfg)

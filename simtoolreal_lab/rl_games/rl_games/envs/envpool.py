@@ -1,4 +1,4 @@
-from reference.rl_games.rl_games.common.ivecenv import IVecEnv
+from rl_games.common.ivecenv import IVecEnv
 import gym
 import numpy as np
 
@@ -13,7 +13,7 @@ def flatten_dict(obs):
 
 class Envpool(IVecEnv):
     def __init__(self, config_name, num_actors, **kwargs):
-        import reference.rl_games.rl_games.envs.envpool as envpool
+        import rl_games.envs.envpool as envpool
 
         self.batch_size = num_actors
         env_name=kwargs.pop('env_name')
