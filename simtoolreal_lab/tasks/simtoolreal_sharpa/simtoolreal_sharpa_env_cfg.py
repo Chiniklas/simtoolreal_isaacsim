@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import isaaclab.sim as sim_utils
 from isaaclab.assets import RigidObjectCfg
 from isaaclab.envs import DirectRLEnvCfg
@@ -11,6 +13,63 @@ from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMater
 from isaaclab.utils import configclass
 
 from simtoolreal_lab.assets.kuka_sharpa import KUKA_SHARPA_CFG, KUKA_SHARPA_JOINT_NAMES
+
+
+SIMTOOLREAL_LAB_DIR = Path(__file__).resolve().parents[2]
+DEXTOOLBENCH_USD_DIR = SIMTOOLREAL_LAB_DIR / "assets" / "dextoolbench_usd"
+DEXTOOLBENCH_OBJECT_SCALES = {
+    "mallet_hammer": (6.0, 0.75, 0.5),
+    "claw_hammer": (2.5, 0.5625, 0.375),
+    "long_screwdriver": (2.5, 0.75, 0.75),
+    "short_screwdriver": (1.75, 0.875, 0.875),
+    "handle_eraser": (2.25, 0.8, 0.25),
+    "flat_eraser": (2.5, 0.7, 1.25),
+    "flat_spatula": (5.0, 0.375, 0.1875),
+    "spoon_spatula": (3.0, 0.5, 0.5),
+    "sharpie_marker": (2.125, 0.55, 0.55),
+    "staples_marker": (3.0, 0.45, 0.45),
+    "red_brush": (2.5, 0.5, 0.375),
+    "blue_brush": (3.0, 0.875, 0.5),
+}
+
+
+def _object_rigid_props() -> sim_utils.RigidBodyPropertiesCfg:
+    return sim_utils.RigidBodyPropertiesCfg(
+        kinematic_enabled=False,
+        disable_gravity=False,
+        enable_gyroscopic_forces=True,
+        solver_position_iteration_count=8,
+        solver_velocity_iteration_count=2,
+        sleep_threshold=0.005,
+        stabilization_threshold=0.0025,
+        max_depenetration_velocity=100.0,
+    )
+
+
+def make_dextoolbench_object_cfg(object_name: str, mass: float) -> RigidObjectCfg:
+    usd_path = DEXTOOLBENCH_USD_DIR / object_name / f"{object_name}.usd"
+    if object_name not in DEXTOOLBENCH_OBJECT_SCALES:
+        known = ", ".join(sorted(DEXTOOLBENCH_OBJECT_SCALES))
+        raise ValueError(f"Unknown DexToolBench object '{object_name}'. Known objects: {known}")
+    if not usd_path.exists():
+        raise FileNotFoundError(f"Missing USD for DexToolBench object '{object_name}': {usd_path}")
+
+    return RigidObjectCfg(
+        prim_path="/World/envs/env_.*/object",
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=str(usd_path),
+            rigid_props=_object_rigid_props(),
+            mass_props=sim_utils.MassPropertiesCfg(mass=mass),
+            collision_props=sim_utils.CollisionPropertiesCfg(),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.63), rot=(1.0, 0.0, 0.0, 0.0)),
+    )
+
+
+def configure_dextoolbench_object(cfg: "SimToolRealSharpaEnvCfg", object_name: str) -> None:
+    cfg.object_name = object_name
+    cfg.object_cfg = make_dextoolbench_object_cfg(object_name, cfg.object_mass)
+    cfg.object_scales = DEXTOOLBENCH_OBJECT_SCALES[object_name]
 
 
 @configclass
@@ -43,6 +102,7 @@ class SimToolRealSharpaEnvCfg(DirectRLEnvCfg):
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1024, env_spacing=1.2, replicate_physics=True)
 
     # assets
+    object_name = "cube"
     robot_cfg = KUKA_SHARPA_CFG.replace(prim_path="/World/envs/env_.*/Robot")
     actuated_joint_names = KUKA_SHARPA_JOINT_NAMES
     palm_body_name = "left_hand_C_MC"
@@ -65,21 +125,13 @@ class SimToolRealSharpaEnvCfg(DirectRLEnvCfg):
         ),
         init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.38), rot=(1.0, 0.0, 0.0, 0.0)),
     )
+    object_mass = 0.05
     object_cfg: RigidObjectCfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/object",
         spawn=sim_utils.CuboidCfg(
             size=(0.04, 0.04, 0.04),
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                kinematic_enabled=False,
-                disable_gravity=False,
-                enable_gyroscopic_forces=True,
-                solver_position_iteration_count=8,
-                solver_velocity_iteration_count=2,
-                sleep_threshold=0.005,
-                stabilization_threshold=0.0025,
-                max_depenetration_velocity=100.0,
-            ),
-            mass_props=sim_utils.MassPropertiesCfg(mass=0.05),
+            rigid_props=_object_rigid_props(),
+            mass_props=sim_utils.MassPropertiesCfg(mass=object_mass),
             collision_props=sim_utils.CollisionPropertiesCfg(),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.1, 0.35, 0.9)),
             physics_material=RigidBodyMaterialCfg(static_friction=0.5, dynamic_friction=0.5),

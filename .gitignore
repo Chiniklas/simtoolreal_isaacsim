@@ -46,3 +46,6 @@ simtoolreal_lab/assets/kuka_sharpa/**/*.usd
 /install/
 /log/
 .catkin_workspace
+assets/
+dextoolbench/
+pretrained_policy/

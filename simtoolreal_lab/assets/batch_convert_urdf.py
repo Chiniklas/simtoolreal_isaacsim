@@ -122,9 +122,6 @@ def main():
 
         update_urdf(full_object_urdf_path, object_name)
 
-        # TODO: make this a CLI arg
-        convex_decompose_mesh = True
-
         urdf_converter_cfg = UrdfConverterCfg(
             asset_path=full_object_urdf_path,
             usd_dir=full_object_usd_path,
@@ -133,7 +130,9 @@ def main():
             merge_fixed_joints=args_cli.merge_joints,
             force_usd_conversion=True,
             make_instanceable=args_cli.make_instanceable,
-            convex_decompose_mesh=convex_decompose_mesh,
+            joint_drive=None,
+            collider_type="convex_decomposition",
+            replace_cylinders_with_capsules=True,
         )
 
         # Print info

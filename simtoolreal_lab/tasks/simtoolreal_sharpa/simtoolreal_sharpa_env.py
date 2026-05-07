@@ -32,6 +32,7 @@ class SimToolRealSharpaEnv(DirectRLEnv):
 
     def __init__(self, cfg: SimToolRealSharpaEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
+        self._apply_object_mass()
 
         self.num_robot_dofs = self.robot.num_joints
         self.actuated_dof_indices = [self.robot.joint_names.index(name) for name in cfg.actuated_joint_names]
@@ -79,6 +80,22 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         self.scene.rigid_objects["object"] = self.object
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
+
+    def _apply_object_mass(self) -> None:
+        masses = self.object.root_physx_view.get_masses().clone()
+        inertias = self.object.root_physx_view.get_inertias().clone()
+        old_masses = masses.clone()
+        per_body_mass = self.cfg.object_mass / self.object.num_bodies
+        masses[:] = per_body_mass
+
+        ratios = torch.where(old_masses > 0.0, masses / old_masses, torch.ones_like(masses))
+        inertias[:] = inertias * ratios.unsqueeze(-1)
+
+        env_ids = torch.arange(self.object.num_instances, device="cpu", dtype=torch.long)
+        self.object.root_physx_view.set_masses(masses, env_ids)
+        self.object.root_physx_view.set_inertias(inertias, env_ids)
+        self.object.data.default_mass = masses.clone()
+        self.object.data.default_inertia = inertias.clone()
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         self.prev_actions.copy_(self.actions)

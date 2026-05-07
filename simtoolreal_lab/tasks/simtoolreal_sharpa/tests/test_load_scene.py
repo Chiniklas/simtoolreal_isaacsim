@@ -18,6 +18,7 @@ import torch  # noqa: E402
 import simtoolreal_lab.tasks.simtoolreal_sharpa.gym_setup  # noqa: E402,F401
 from simtoolreal_lab.tasks.simtoolreal_sharpa.simtoolreal_sharpa_env_cfg import (  # noqa: E402
     SimToolRealSharpaEnvCfg,
+    configure_dextoolbench_object,
 )
 
 
@@ -51,5 +52,26 @@ def test_simtoolreal_sharpa_scene_loads_and_steps(simulation_app):
         assert rewards.shape == (1,)
         assert terminated.shape == (1,)
         assert truncated.shape == (1,)
+    finally:
+        env.close()
+
+
+def test_simtoolreal_sharpa_dextoolbench_object_loads(simulation_app):
+    cfg = SimToolRealSharpaEnvCfg()
+    cfg.scene.num_envs = 1
+    cfg.sim.device = os.environ.get("SIMTOOLREAL_TEST_DEVICE", "cuda:0")
+    configure_dextoolbench_object(cfg, "claw_hammer")
+
+    env = gym.make("simtoolreal_sharpa", cfg=cfg)
+    try:
+        unwrapped = env.unwrapped
+        assert unwrapped.cfg.object_name == "claw_hammer"
+        assert tuple(unwrapped.cfg.object_scales) == (2.5, 0.5625, 0.375)
+
+        masses = unwrapped.object.root_physx_view.get_masses()
+        assert torch.allclose(masses.sum(dim=1), torch.full((1,), cfg.object_mass, device=masses.device))
+
+        obs, _ = env.reset()
+        assert obs["policy"].shape == (1, cfg.num_observations)
     finally:
         env.close()
