@@ -142,6 +142,51 @@ python simtoolreal_lab/play_rl_games.py \
   --checkpoint /path/to/checkpoint.pth
 ```
 
+## MuJoCo Sim2Sim
+
+The no-ROS MuJoCo sim2sim runner lives under `simtoolreal_lab/deployment/mujoco`.
+It loads the pretrained RL-Games policy and the same browser-demo MuJoCo MJCF
+asset bundle mirrored at
+`simtoolreal_lab/assets/mujoco_wasm/scenes/iiwa_sharpa.xml`. The replay computes
+the 140-value policy observation from MuJoCo state and applies the 29-action
+joint target command through the scene's MJCF actuators. The bundled scene uses
+its built-in hammer object body; `--object-name claw_hammer` selects the matching
+policy object-scale metadata.
+
+```bash
+conda activate simtoolreal
+cd /home/chi-zhang/projects/simtoolreal_isaacsim
+
+python -m simtoolreal_lab.deployment.mujoco.mujoco_env_no_ros \
+  --config-path simtoolreal_lab/pretrained_policy/config.yaml \
+  --checkpoint-path simtoolreal_lab/pretrained_policy/model.pth \
+  --object-name claw_hammer
+```
+
+For a headless smoke run:
+
+```bash
+python -m simtoolreal_lab.deployment.mujoco.mujoco_env_no_ros \
+  --no-enable-viewer \
+  --max-steps 1 \
+  --object-name claw_hammer
+```
+
+This path requires the Python `mujoco` package in the active environment.
+
+If it is not installed yet:
+
+```bash
+python -m pip install mujoco
+```
+
+Run with the MuJoCo viewer:
+
+```bash
+python -m simtoolreal_lab.deployment.mujoco.mujoco_env_no_ros \
+  --object-name claw_hammer
+```
+
 ## Current Status
 
 Implemented:
