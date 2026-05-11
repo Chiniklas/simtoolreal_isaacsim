@@ -71,10 +71,8 @@ def safe_filesystem_op(func, *args, **kwargs):
     raise RuntimeError(f'Could not execute {func}, give up after {num_attempts} attempts...')
 
 def safe_symlink(src, dst):
-    try:
+    if os.path.lexists(dst):
         safe_filesystem_op(os.remove, dst)
-    except (FileExistsError, RuntimeError):
-        pass
     safe_filesystem_op(os.symlink, src, dst)
 
 def safe_save(state, filename):
@@ -84,8 +82,10 @@ def safe_load(filename):
     return safe_filesystem_op(torch.load, filename, weights_only=False)
 
 def save_checkpoint(filename, state):
-    print("=> saving checkpoint '{}'".format(filename + '.pth'))
-    safe_save(state, filename + '.pth')
+    if not filename.endswith('.pth'):
+        filename = filename + '.pth'
+    print("=> saving checkpoint '{}'".format(filename))
+    safe_save(state, filename)
 
 def load_checkpoint(filename):
     print("=> loading checkpoint '{}'".format(filename))

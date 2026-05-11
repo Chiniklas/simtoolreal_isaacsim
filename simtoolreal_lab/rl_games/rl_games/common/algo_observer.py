@@ -102,10 +102,18 @@ class IsaacAlgoObserver(AlgoObserver):
         # log other variables directly
         if len(infos) > 0 and isinstance(infos, dict):  # allow direct logging from env
             self.direct_info = {}
+            def _flatten(prefix, value):
+                if isinstance(value, dict):
+                    for child_key, child_value in value.items():
+                        child_prefix = f"{prefix}/{child_key}" if prefix else child_key
+                        _flatten(child_prefix, child_value)
+                elif isinstance(value, float) or isinstance(value, int) or (
+                    isinstance(value, torch.Tensor) and len(value.shape) == 0
+                ):
+                    self.direct_info[prefix] = value
+
             for k, v in infos.items():
-                # only log scalars
-                if isinstance(v, float) or isinstance(v, int) or (isinstance(v, torch.Tensor) and len(v.shape) == 0):
-                    self.direct_info[k] = v
+                _flatten(k, v)
 
     def after_clear_stats(self):
         # clear stored buffers

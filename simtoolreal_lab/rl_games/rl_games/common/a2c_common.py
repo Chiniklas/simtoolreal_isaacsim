@@ -35,34 +35,50 @@ def rescale_actions(low, high, action):
     return scaled_action
 
 
-def print_statistics(print_stats, curr_frames, step_time, step_inference_time, total_time, epoch_num, max_epochs, frame, max_frames):
+def print_statistics(
+    print_stats,
+    curr_frames,
+    step_time,
+    step_inference_time,
+    total_time,
+    epoch_num,
+    max_epochs,
+    frame,
+    max_frames,
+    reward=None,
+    reward_terms=None,
+):
     if print_stats:
-        step_time = max(step_time, 1e-9)
-        fps_step = curr_frames / step_time
-        fps_step_inference = curr_frames / step_inference_time
-        fps_total = curr_frames / total_time
-
-        # Prepare formatted strings
-        fps_strs = [
-            f"fps step                    : {fps_step:,.0f}",
-            f"fps step + policy inference : {fps_step_inference:,.0f}",
-            f"fps total                   : {fps_total:,.0f}"
-        ]
-
         epoch_str = f"{epoch_num:,.0f}"
         if max_epochs != -1:
             epoch_str += f" / {max_epochs:,.0f}"
-
-        frame_str = f"{frame:,.0f}"
-        if max_frames != -1:
-            frame_str += f" / {max_frames:,.0f}"
-
-        # Print neatly
-        print("\nStatistics:")
-        for s in fps_strs:
-            print(f"  {s}")
-        print(f"  epoch                       : {epoch_str}")
-        print(f"  frames                      : {frame_str}\n")
+        reward_str = "n/a" if reward is None else f"{float(reward):.3f}"
+        print(f"[train] epoch {epoch_str} | reward {reward_str} | time {total_time:.3f}s")
+        if reward_terms:
+            ordered_keys = [
+                "fingertip_delta_reward",
+                "hand_delta_penalty",
+                "lifting_reward",
+                "lift_bonus_reward",
+                "keypoint_reward",
+                "reach_bonus",
+                "arm_action_penalty",
+                "hand_action_penalty",
+                "object_lin_vel_penalty",
+                "object_ang_vel_penalty",
+                "total_reward",
+            ]
+            formatted_terms = []
+            for key in ordered_keys:
+                if key in reward_terms:
+                    formatted_terms.append(f"{key}={float(reward_terms[key]):.3f}")
+            if formatted_terms:
+                print("  reward_terms")
+                print("    " + " | ".join(formatted_terms[:3]))
+                print("    " + " | ".join(formatted_terms[3:6]))
+                print("    " + " | ".join(formatted_terms[6:9]))
+                print("    " + " | ".join(formatted_terms[9:]))
+        print("  " + "-" * 120)
 
 
 class A2CBase(BaseAlgorithm):
@@ -271,7 +287,7 @@ class A2CBase(BaseAlgorithm):
         # folders inside <train_dir>/<experiment_dir> for a specific purpose
         self.nn_dir = os.path.join(self.experiment_dir, 'nn')
         self.summaries_dir = os.path.join(self.experiment_dir, 'summaries')
-        self.batch_dir = os.path.join(self.train_dir, 'batches')
+        self.batch_dir = os.path.join(self.experiment_dir, 'batches')
 
         os.makedirs(self.train_dir, exist_ok=True)
         os.makedirs(self.experiment_dir, exist_ok=True)
@@ -423,7 +439,6 @@ class A2CBase(BaseAlgorithm):
         self.writer.add_scalar('info/e_clip', self.e_clip * lr_mul, frame)
         self.writer.add_scalar('info/kl', torch_ext.mean_list(kls).item(), frame)
         self.writer.add_scalar('info/epochs', epoch_num, frame)
-        print(f"\nPolicy {self.policy_idx}:", end=' ')
         self.algo_observer.after_print_stats(frame, epoch_num, total_time)
 
     def set_eval(self):
@@ -1248,8 +1263,18 @@ class DiscreteA2CBase(A2CBase):
 
                 frame = self.frame // self.num_agents
 
-                print_statistics(self.print_stats, curr_frames, step_time, scaled_play_time, scaled_time, 
-                                epoch_num, self.max_epochs, frame, self.max_frames)
+                reward_for_print = self.game_rewards.get_mean()[0] if self.game_rewards.current_size > 0 else None
+                reward_terms_for_print = None
+                if hasattr(self.algo_observer, "direct_info"):
+                    reward_terms_for_print = {}
+                    for key, value in self.algo_observer.direct_info.items():
+                        prefix = "reward_terms/"
+                        if key.startswith(prefix):
+                            reward_terms_for_print[key[len(prefix):]] = value
+                    if len(reward_terms_for_print) == 0:
+                        reward_terms_for_print = None
+                print_statistics(self.print_stats, curr_frames, step_time, scaled_play_time, scaled_time,
+                                epoch_num, self.max_epochs, frame, self.max_frames, reward_for_print, reward_terms_for_print)
 
                 self.write_stats(total_time, epoch_num, step_time, play_time, update_time,
                                 a_losses, c_losses, entropies, kls, last_lr, lr_mul, frame, 
@@ -1280,22 +1305,21 @@ class DiscreteA2CBase(A2CBase):
                     if self.has_self_play_config:
                         self.self_play_manager.update(self)
 
-                    # removed equal signs (i.e. "rew=") from the checkpoint name since it messes with hydra CLI parsing
-                    checkpoint_name = self.config['name'] + '_ep_' + str(epoch_num) + '_rew_' + str(mean_rewards[0])
+                    checkpoint_name = f'model_{epoch_num}.pth'
 
                     if self.save_freq > 0:
                         if epoch_num % self.save_freq == 0:
-                            self.save(os.path.join(self.nn_dir, 'last_' + checkpoint_name))
+                            self.save(os.path.join(self.nn_dir, checkpoint_name))
                         if epoch_num % 3 == 0:
                             torch_ext.safe_filesystem_op(os.makedirs, os.path.join(self.experiment_dir, 'last'), exist_ok=True)
-                            self.save(os.path.join(self.experiment_dir, 'last', 'model'))
+                            self.save(os.path.join(self.experiment_dir, 'last', 'model.pth'))
 
                     if mean_rewards[0] > self.last_mean_rewards and epoch_num >= self.save_best_after:
                         print('saving next best rewards: ', mean_rewards)
                         self.last_mean_rewards = mean_rewards[0]
-                        self.save(os.path.join(self.nn_dir, self.config['name']))
+                        self.save(os.path.join(self.nn_dir, checkpoint_name))
                         torch_ext.safe_filesystem_op(os.makedirs, os.path.join(self.experiment_dir, 'best'), exist_ok=True)
-                        torch_ext.safe_symlink(os.path.relpath(os.path.join(self.nn_dir, self.config['name'] + '.pth'), start=os.path.join(self.experiment_dir, 'best')), os.path.join(self.experiment_dir, 'best', 'model.pth'))
+                        torch_ext.safe_symlink(os.path.relpath(os.path.join(self.nn_dir, checkpoint_name), start=os.path.join(self.experiment_dir, 'best')), os.path.join(self.experiment_dir, 'best', 'model.pth'))
 
                         if 'score_to_win' in self.config:
                             if self.last_mean_rewards > self.config['score_to_win']:
@@ -1308,8 +1332,7 @@ class DiscreteA2CBase(A2CBase):
                         print('WARNING: Max epochs reached before any env terminated at least once')
                         mean_rewards = -np.inf
 
-                    self.save(os.path.join(self.nn_dir, 'last_' + self.config['name'] + '_ep_' + str(epoch_num) \
-                        + '_rew_' + str(mean_rewards).replace('[', '_').replace(']', '_')))
+                    self.save(os.path.join(self.nn_dir, f'model_{epoch_num}.pth'))
                     print('MAX EPOCHS NUM!')
                     should_exit = True
 
@@ -1318,8 +1341,7 @@ class DiscreteA2CBase(A2CBase):
                         print('WARNING: Max frames reached before any env terminated at least once')
                         mean_rewards = -np.inf
 
-                    self.save(os.path.join(self.nn_dir, 'last_' + self.config['name'] + '_frame_' + str(self.frame) \
-                        + '_rew_' + str(mean_rewards).replace('[', '_').replace(']', '_')))
+                    self.save(os.path.join(self.nn_dir, f'model_{epoch_num}.pth'))
                     print('MAX FRAMES NUM!')
                     should_exit = True
 
@@ -1456,12 +1478,6 @@ class ContinuousA2CBase(A2CBase):
         play_time = play_time_end - play_time_start
         update_time = update_time_end - update_time_start
         total_time = update_time_end - play_time_start
-        DECIMALS = 3
-        print("\nTiming:")
-        print(f"  Play time               : {play_time:.{DECIMALS}f} s")
-        print(f"  Update time             : {update_time:.{DECIMALS}f} s")
-        print(f"  Time to train epoch     : {total_time:.{DECIMALS}f} s\n")
-
         return batch_dict['step_time'], play_time, update_time, total_time, a_losses, c_losses, b_losses, entropies, kls, last_lr, lr_mul, extra_infos
 
     def prepare_dataset(self, batch_dict, train_value_mean_std=True):
@@ -1573,8 +1589,18 @@ class ContinuousA2CBase(A2CBase):
                 curr_frames = self.curr_frames * self.world_size if self.multi_gpu else self.curr_frames
                 self.frame += curr_frames
 
-                print_statistics(self.print_stats, curr_frames, step_time, scaled_play_time, scaled_time, 
-                                epoch_num, self.max_epochs, frame, self.max_frames)
+                reward_for_print = self.game_rewards.get_mean()[0] if self.game_rewards.current_size > 0 else None
+                reward_terms_for_print = None
+                if hasattr(self.algo_observer, "direct_info"):
+                    reward_terms_for_print = {}
+                    for key, value in self.algo_observer.direct_info.items():
+                        prefix = "reward_terms/"
+                        if key.startswith(prefix):
+                            reward_terms_for_print[key[len(prefix):]] = value
+                    if len(reward_terms_for_print) == 0:
+                        reward_terms_for_print = None
+                print_statistics(self.print_stats, curr_frames, step_time, scaled_play_time, scaled_time,
+                                epoch_num, self.max_epochs, frame, self.max_frames, reward_for_print, reward_terms_for_print)
 
                 self.write_stats(total_time, epoch_num, step_time, play_time, update_time,
                                 a_losses, c_losses, entropies, kls, last_lr, lr_mul, frame,
@@ -1638,23 +1664,23 @@ class ContinuousA2CBase(A2CBase):
                     if self.has_self_play_config:
                         self.self_play_manager.update(self)
 
-                    checkpoint_name = self.config['name'] + '_ep_' + str(epoch_num) + '_rew_' + str(mean_rewards[0])
+                    checkpoint_name = f'model_{epoch_num}.pth'
 
                     if self.save_freq > 0:
                         if int(math.sqrt(epoch_num // self.save_freq)) ** 2 == epoch_num // self.save_freq and epoch_num % self.save_freq == 0:
-                            self.save(os.path.join(self.nn_dir, 'last_' + checkpoint_name), all_state_dict)
+                            self.save(os.path.join(self.nn_dir, checkpoint_name), all_state_dict)
                         if epoch_num % 200 == 0:    
                             torch_ext.safe_filesystem_op(os.makedirs, os.path.join(self.experiment_dir, 'last'), exist_ok=True)
                             if os.path.exists(os.path.join(self.experiment_dir, 'last', 'model.pth')):
                                 os.system(f"cp {os.path.join(self.experiment_dir, 'last', 'model.pth')} {os.path.join(self.experiment_dir, 'last', 'model.pth.old')}")
-                            self.save(os.path.join(self.experiment_dir, 'last', 'model'), all_state_dict)
+                            self.save(os.path.join(self.experiment_dir, 'last', 'model.pth'), all_state_dict)
 
                     if mean_rewards[0] > self.last_mean_rewards and epoch_num >= 10:
                         print('saving next best rewards: ', mean_rewards)
                         self.last_mean_rewards = mean_rewards[0]
-                        self.save(os.path.join(self.nn_dir, self.config['name']), all_state_dict)
+                        self.save(os.path.join(self.nn_dir, checkpoint_name), all_state_dict)
                         torch_ext.safe_filesystem_op(os.makedirs, os.path.join(self.experiment_dir, 'best'), exist_ok=True)
-                        torch_ext.safe_symlink(os.path.relpath(os.path.join(self.nn_dir, self.config['name'] + '.pth'), start=os.path.join(self.experiment_dir, 'best')), os.path.join(self.experiment_dir, 'best', 'model.pth'))
+                        torch_ext.safe_symlink(os.path.relpath(os.path.join(self.nn_dir, checkpoint_name), start=os.path.join(self.experiment_dir, 'best')), os.path.join(self.experiment_dir, 'best', 'model.pth'))
 
                         if 'score_to_win' in self.config:
                             if self.last_mean_rewards > self.config['score_to_win']:
@@ -1667,8 +1693,7 @@ class ContinuousA2CBase(A2CBase):
                         print('WARNING: Max epochs reached before any env terminated at least once')
                         mean_rewards = -np.inf
 
-                    self.save(os.path.join(self.nn_dir, 'last_' + self.config['name'] + '_ep_' + str(epoch_num) \
-                        + '_rew_' + str(mean_rewards).replace('[', '_').replace(']', '_')), all_state_dict)
+                    self.save(os.path.join(self.nn_dir, f'model_{epoch_num}.pth'), all_state_dict)
                     print('MAX EPOCHS NUM!')
                     should_exit = True
 
@@ -1677,8 +1702,7 @@ class ContinuousA2CBase(A2CBase):
                         print('WARNING: Max frames reached before any env terminated at least once')
                         mean_rewards = -np.inf
 
-                    self.save(os.path.join(self.nn_dir, 'last_' + self.config['name'] + '_frame_' + str(self.frame) \
-                        + '_rew_' + str(mean_rewards).replace('[', '_').replace(']', '_')), all_state_dict)
+                    self.save(os.path.join(self.nn_dir, f'model_{epoch_num}.pth'), all_state_dict)
                     print('MAX FRAMES NUM!')
                     should_exit = True
 

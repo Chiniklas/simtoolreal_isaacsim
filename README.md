@@ -110,7 +110,9 @@ python simtoolreal_lab/train_rl_games.py \
   agent.params.config.minibatch_size=1024 \
   agent.params.config.horizon_length=16 \
   agent.params.config.mini_epochs=4 \
+  agent.params.config.central_value_config.minibatch_size=1024 \
   agent.params.config.expl_type=none \
+  agent.params.network.space.continuous.fixed_sigma=fixed \
   agent.wandb_activate=False
 ```
 
@@ -119,14 +121,21 @@ Enable the customized SAPO / mixed-exploration path with:
 ```bash
 python simtoolreal_lab/train_rl_games.py \
   --task simtoolreal_sharpa \
-  --num_envs 4096 \
+  --num_envs 512 \
   --headless \
   agent.params.config.expl_type=mixed_expl \
   agent.params.config.use_others_experience=lf \
   agent.params.config.off_policy_ratio=1.0 \
   agent.params.config.expl_reward_type=entropy \
-  agent.params.config.expl_coef_block_size=4096 \
+  agent.params.config.expl_coef_block_size=512 \
   agent.wandb_activate=False
+```
+
+Hydra output and RL-Games training logs are written inside the task directory:
+
+```text
+simtoolreal_lab/tasks/simtoolreal_sharpa/outputs/<date>/<time>/
+simtoolreal_lab/tasks/simtoolreal_sharpa/logs/<experiment_name>/
 ```
 
 ## Play
@@ -200,9 +209,24 @@ Implemented:
 Remaining parity work:
 
 - DexToolBench object loading in Isaac Lab.
-- Full reference reward and statistic breakdown.
+- Final reward/reset/statistics parity review.
 - Observation/action delay queues.
 - Object force and torque disturbances.
 - Evaluation and video utilities matching `reference/`.
+
+Reward parity review, simplified:
+
+- [x] Use USD-based KUKA-SHARPA asset in training.
+- [x] Use reference-style palm and fingertip frames with offsets.
+- [x] Switch success check to keypoint-goal tolerance instead of object-center distance.
+- [x] Switch pre-lift shaping to fingertip-to-object distance deltas.
+- [x] Switch lift reward to reference-style threshold bonus plus post-threshold gating.
+- [x] Switch keypoint reward to improvement-based shaping after lift.
+- [x] Switch action penalties from commanded actions to joint-velocity penalties.
+- [x] Add object linear/angular velocity penalty hooks with reference default scales of `0.0`.
+- [x] Reset goal on success without fully resetting the environment.
+- [ ] Re-check reset logic against reference (`hand_far_from_object`, dropped-object hysteresis, table-force resets).
+- [ ] Re-check goal sampling details against reference delta-goal behavior.
+- [ ] Re-check logging/statistics breakdown against reference training curves.
 
 For the original IsaacGym documentation, see `reference/README.md`.

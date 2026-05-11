@@ -67,7 +67,7 @@ params:
     max_epochs: 1000000
     max_frames: 100000000000000
     save_best_after: 100
-    save_frequency: 3000
+    save_frequency: 1000 # default 3000
     print_stats: True
     grad_norm: 1.0
     entropy_coef: 0.0

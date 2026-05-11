@@ -8,6 +8,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import RigidObjectCfg
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.sensors import ContactSensorCfg
 from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
 from isaaclab.utils import configclass
@@ -46,6 +47,21 @@ def _object_rigid_props() -> sim_utils.RigidBodyPropertiesCfg:
     )
 
 
+def make_cube_object_cfg(mass: float) -> RigidObjectCfg:
+    return RigidObjectCfg(
+        prim_path="/World/envs/env_.*/object",
+        spawn=sim_utils.CuboidCfg(
+            size=(0.04, 0.04, 0.04),
+            rigid_props=_object_rigid_props(),
+            mass_props=sim_utils.MassPropertiesCfg(mass=mass),
+            collision_props=sim_utils.CollisionPropertiesCfg(),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.1, 0.35, 0.9)),
+            physics_material=RigidBodyMaterialCfg(static_friction=0.5, dynamic_friction=0.5),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.63), rot=(1.0, 0.0, 0.0, 0.0)),
+    )
+
+
 def make_dextoolbench_object_cfg(object_name: str, mass: float) -> RigidObjectCfg:
     usd_path = DEXTOOLBENCH_USD_DIR / object_name / f"{object_name}.usd"
     if object_name not in DEXTOOLBENCH_OBJECT_SCALES:
@@ -66,10 +82,61 @@ def make_dextoolbench_object_cfg(object_name: str, mass: float) -> RigidObjectCf
     )
 
 
+def make_multi_dextoolbench_object_cfg(object_names: list[str], mass: float) -> RigidObjectCfg:
+    usd_paths: list[str] = []
+    for object_name in object_names:
+        usd_path = DEXTOOLBENCH_USD_DIR / object_name / f"{object_name}.usd"
+        if object_name not in DEXTOOLBENCH_OBJECT_SCALES:
+            known = ", ".join(sorted(DEXTOOLBENCH_OBJECT_SCALES))
+            raise ValueError(f"Unknown DexToolBench object '{object_name}'. Known objects: {known}")
+        if not usd_path.exists():
+            raise FileNotFoundError(f"Missing USD for DexToolBench object '{object_name}': {usd_path}")
+        usd_paths.append(str(usd_path))
+
+    return RigidObjectCfg(
+        prim_path="/World/envs/env_.*/object",
+        spawn=sim_utils.MultiUsdFileCfg(
+            usd_path=usd_paths,
+            random_choice=False,
+            rigid_props=_object_rigid_props(),
+            mass_props=sim_utils.MassPropertiesCfg(mass=mass),
+            collision_props=sim_utils.CollisionPropertiesCfg(),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.63), rot=(1.0, 0.0, 0.0, 0.0)),
+    )
+
+
+def configure_cube_object(cfg: "SimToolRealSharpaEnvCfg") -> None:
+    cfg.object_name = "cube"
+    cfg.object_cfg = make_cube_object_cfg(cfg.object_mass)
+    cfg.object_scales = (1.0, 1.0, 1.0)
+    cfg.scene.replicate_physics = True
+
+
 def configure_dextoolbench_object(cfg: "SimToolRealSharpaEnvCfg", object_name: str) -> None:
     cfg.object_name = object_name
     cfg.object_cfg = make_dextoolbench_object_cfg(object_name, cfg.object_mass)
     cfg.object_scales = DEXTOOLBENCH_OBJECT_SCALES[object_name]
+
+
+def configure_multi_dextoolbench_objects(cfg: "SimToolRealSharpaEnvCfg", object_names: list[str]) -> None:
+    cfg.object_name = "multi_dextoolbench"
+    cfg.multi_object_names = tuple(object_names)
+    cfg.object_cfg = make_multi_dextoolbench_object_cfg(object_names, cfg.object_mass)
+    cfg.object_scales = DEXTOOLBENCH_OBJECT_SCALES[object_names[0]]
+
+
+def apply_object_selection(cfg: "SimToolRealSharpaEnvCfg") -> None:
+    if cfg.object_name == "cube":
+        configure_cube_object(cfg)
+    elif cfg.object_name == "multi_dextoolbench":
+        cfg.scene.replicate_physics = False
+        configure_multi_dextoolbench_objects(cfg, list(cfg.multi_object_names))
+    elif cfg.object_name in DEXTOOLBENCH_OBJECT_SCALES:
+        configure_dextoolbench_object(cfg, cfg.object_name)
+    else:
+        known = ", ".join(["cube", "multi_dextoolbench", *sorted(DEXTOOLBENCH_OBJECT_SCALES)])
+        raise ValueError(f"Unknown object_name '{cfg.object_name}'. Known values: {known}")
 
 
 @configclass
@@ -102,17 +169,26 @@ class SimToolRealSharpaEnvCfg(DirectRLEnvCfg):
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1024, env_spacing=1.2, replicate_physics=True)
 
     # assets
-    object_name = "cube"
+    object_name = "multi_dextoolbench"
+    multi_object_names = tuple(sorted(DEXTOOLBENCH_OBJECT_SCALES))
     robot_cfg = KUKA_SHARPA_CFG.replace(prim_path="/World/envs/env_.*/Robot")
     actuated_joint_names = KUKA_SHARPA_JOINT_NAMES
-    palm_body_name = "left_hand_C_MC"
+    palm_body_name = "iiwa14_link_7"
     fingertip_body_names = [
-        "left_index_fingertip",
-        "left_middle_fingertip",
-        "left_ring_fingertip",
-        "left_thumb_fingertip",
-        "left_pinky_fingertip",
+        "left_index_DP",
+        "left_middle_DP",
+        "left_ring_DP",
+        "left_thumb_DP",
+        "left_pinky_DP",
     ]
+    palm_offset = (0.0, -0.02, 0.16)
+    fingertip_offsets = (
+        (0.02, 0.002, 0.0),
+        (0.02, 0.002, 0.0),
+        (0.02, 0.002, 0.0),
+        (0.02, 0.002, 0.0),
+        (0.02, 0.002, 0.0),
+    )
 
     table_cfg: RigidObjectCfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/table",
@@ -120,24 +196,19 @@ class SimToolRealSharpaEnvCfg(DirectRLEnvCfg):
             size=(0.475, 0.4, 0.3),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
             collision_props=sim_utils.CollisionPropertiesCfg(),
+            activate_contact_sensors=True,
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.82, 0.56, 0.35)),
             physics_material=RigidBodyMaterialCfg(static_friction=0.5, dynamic_friction=0.5),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.38), rot=(1.0, 0.0, 0.0, 0.0)),
     )
-    object_mass = 0.05
-    object_cfg: RigidObjectCfg = RigidObjectCfg(
-        prim_path="/World/envs/env_.*/object",
-        spawn=sim_utils.CuboidCfg(
-            size=(0.04, 0.04, 0.04),
-            rigid_props=_object_rigid_props(),
-            mass_props=sim_utils.MassPropertiesCfg(mass=object_mass),
-            collision_props=sim_utils.CollisionPropertiesCfg(),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.1, 0.35, 0.9)),
-            physics_material=RigidBodyMaterialCfg(static_friction=0.5, dynamic_friction=0.5),
-        ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.63), rot=(1.0, 0.0, 0.0, 0.0)),
+    table_contact_sensor: ContactSensorCfg = ContactSensorCfg(
+        prim_path="/World/envs/env_.*/table",
+        debug_vis=False,
+        filter_prim_paths_expr=["/World/envs/env_.*/object"],
     )
+    object_mass = 0.05
+    object_cfg: RigidObjectCfg = make_cube_object_cfg(object_mass)
 
     # reset/control
     clamp_abs_observations = 10.0
@@ -176,10 +247,22 @@ class SimToolRealSharpaEnvCfg(DirectRLEnvCfg):
     hand_actions_penalty_scale = 0.003
     fall_distance = 0.24
     fall_penalty = 0.0
+    object_lin_vel_penalty_scale = 0.0
+    object_ang_vel_penalty_scale = 0.0
+    object_z_low_reset_threshold = 0.1
+    hand_far_from_object_threshold = 1.5
+    with_table_force_sensor = False
+    table_force_threshold = 100.0
+    reset_when_dropped = False
     success_tolerance = 0.075
     success_steps = 10
     max_consecutive_successes = 50
+    force_consecutive_near_goal_steps = False
 
     # disturbance placeholders, kept config-compatible with the reference task.
     force_scale = 0.0
     torque_scale = 0.0
+
+    def __post_init__(self):
+        super().__post_init__()
+        apply_object_selection(self)

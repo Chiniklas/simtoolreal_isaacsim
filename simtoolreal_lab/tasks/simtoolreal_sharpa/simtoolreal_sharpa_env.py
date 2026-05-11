@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
+import re
 
 import torch
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs import DirectRLEnv
+from isaaclab.sensors import ContactSensor
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.math import quat_apply, quat_from_angle_axis, quat_mul, sample_uniform, saturate
 
-from .simtoolreal_sharpa_env_cfg import SimToolRealSharpaEnvCfg
+from .simtoolreal_sharpa_env_cfg import DEXTOOLBENCH_OBJECT_SCALES, SimToolRealSharpaEnvCfg
 from .simtoolreal_sharpa_utils import compute_joint_pos_targets, unscale
 
 
@@ -44,8 +46,10 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         self.prev_action_targets = torch.zeros_like(self.actions)
         self.dof_pos_targets = torch.zeros((self.num_envs, self.num_robot_dofs), device=self.device)
 
-        self.palm_body_idx = self.robot.body_names.index(self.cfg.palm_body_name)
-        self.fingertip_body_indices = [self.robot.body_names.index(name) for name in self.cfg.fingertip_body_names]
+        self.palm_body_idx = self._resolve_body_index(self.cfg.palm_body_name)
+        self.fingertip_body_indices = [self._resolve_body_index(name) for name in self.cfg.fingertip_body_names]
+        self.palm_offset = torch.tensor(self.cfg.palm_offset, device=self.device)
+        self.fingertip_offsets = torch.tensor(self.cfg.fingertip_offsets, device=self.device)
 
         joint_pos_limits = self.robot.root_physx_view.get_dof_limits().to(self.device)
         self.robot_dof_lower_limits = joint_pos_limits[..., 0][:, self.actuated_dof_indices]
@@ -59,11 +63,25 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         self.object_goal_pos = torch.zeros(self.num_envs, 3, device=self.device)
         self.object_goal_rot = torch.zeros(self.num_envs, 4, device=self.device)
         self.object_goal_rot[:, 0] = 1.0
-        self.object_scales = torch.tensor(self.cfg.object_scales, device=self.device).repeat(self.num_envs, 1)
+        if getattr(self.cfg, "object_name", "") == "multi_dextoolbench":
+            per_object_scales = torch.tensor(
+                [DEXTOOLBENCH_OBJECT_SCALES[name] for name in self.cfg.multi_object_names], device=self.device
+            )
+            object_ids = torch.arange(self.num_envs, device=self.device) % per_object_scales.shape[0]
+            self.object_scales = per_object_scales[object_ids]
+        else:
+            self.object_scales = torch.tensor(self.cfg.object_scales, device=self.device).repeat(self.num_envs, 1)
+        self.object_init_pos = torch.zeros(self.num_envs, 3, device=self.device)
         self.object_last_pos = torch.zeros(self.num_envs, 3, device=self.device)
-        self.success_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.successes = torch.zeros(self.num_envs, device=self.device)
         self.consecutive_successes = torch.zeros(self.num_envs, device=self.device)
+        self.near_goal_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.lifted_object = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        num_fingertips = len(self.fingertip_body_indices)
+        self.finger_rew_coeffs = torch.ones((self.num_envs, num_fingertips), device=self.device)
+        self.closest_fingertip_dist = -torch.ones((self.num_envs, num_fingertips), device=self.device)
+        self.furthest_hand_dist = -torch.ones(self.num_envs, device=self.device)
+        self.closest_keypoint_max_dist = -torch.ones(self.num_envs, device=self.device)
 
         self.keypoint_offsets = self._make_keypoint_offsets()
         self._all_env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
@@ -73,11 +91,17 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         self.robot = Articulation(self.cfg.robot_cfg)
         self.table = RigidObject(self.cfg.table_cfg)
         self.object = RigidObject(self.cfg.object_cfg)
+        self.table_contact_sensor = None
+        if self.cfg.with_table_force_sensor:
+            self.table_contact_sensor = ContactSensor(self.cfg.table_contact_sensor)
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
-        self.scene.clone_environments(copy_from_source=False)
+        if self.scene.cfg.replicate_physics:
+            self.scene.clone_environments(copy_from_source=False)
         self.scene.articulations["robot"] = self.robot
         self.scene.rigid_objects["table"] = self.table
         self.scene.rigid_objects["object"] = self.object
+        if self.table_contact_sensor is not None:
+            self.scene.sensors["table_contact_sensor"] = self.table_contact_sensor
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
@@ -89,7 +113,10 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         masses[:] = per_body_mass
 
         ratios = torch.where(old_masses > 0.0, masses / old_masses, torch.ones_like(masses))
-        inertias[:] = inertias * ratios.unsqueeze(-1)
+        inertia_ratios = ratios
+        while inertia_ratios.dim() < inertias.dim():
+            inertia_ratios = inertia_ratios.unsqueeze(-1)
+        inertias[:] = inertias * inertia_ratios
 
         env_ids = torch.arange(self.object.num_instances, device="cpu", dtype=torch.long)
         self.object.root_physx_view.set_masses(masses, env_ids)
@@ -107,6 +134,23 @@ class SimToolRealSharpaEnv(DirectRLEnv):
             self.dof_pos_targets[:, self.actuated_dof_indices], joint_ids=self.actuated_dof_indices
         )
 
+    def _resolve_body_index(self, body_name: str) -> int:
+        matches, matched_names = self.robot.find_bodies(body_name)
+        if matches:
+            return matches[0]
+
+        matches, matched_names = self.robot.find_bodies(f".*{re.escape(body_name)}")
+        if len(matches) == 1:
+            return matches[0]
+
+        available_names = ", ".join(self.robot.body_names)
+        if len(matches) > 1:
+            raise ValueError(
+                f"Body pattern '{body_name}' matched multiple bodies {matched_names}. "
+                f"Available bodies: {available_names}"
+            )
+        raise ValueError(f"Body '{body_name}' not found. Available bodies: {available_names}")
+
     def _get_observations(self) -> dict:
         self._compute_intermediate_values()
         obs = self._compute_reference_observations()
@@ -119,50 +163,92 @@ class SimToolRealSharpaEnv(DirectRLEnv):
     def _get_rewards(self) -> torch.Tensor:
         self._compute_intermediate_values()
 
-        dist_to_goal = torch.norm(self.object_pos - self.object_goal_pos, dim=-1)
-        prev_dist_to_goal = torch.norm(self.object_last_pos - self.object_goal_pos, dim=-1)
-        distance_delta_reward = self.cfg.distance_delta_rew_scale * (prev_dist_to_goal - dist_to_goal)
+        lifting_reward, lift_bonus_reward, lifted_object = self._lifting_reward()
+        fingertip_delta_reward, hand_delta_penalty = self._distance_delta_rewards(lifted_object)
+        keypoint_reward = self._keypoint_reward(lifted_object)
 
-        object_lift = self.object_pos[:, 2] - self.cfg.table_top_z
-        lifted_object = object_lift > self.cfg.lifting_bonus_threshold
-        lifting_reward = self.cfg.lifting_rew_scale * torch.clamp(object_lift, min=0.0)
-        lifting_reward = lifting_reward + self.cfg.lifting_bonus * lifted_object.float()
+        keypoint_success_tolerance = self.cfg.success_tolerance * self.cfg.keypoint_scale
+        near_goal = self.keypoints_max_dist <= keypoint_success_tolerance
+        if self.cfg.force_consecutive_near_goal_steps:
+            self.near_goal_steps = (self.near_goal_steps + near_goal.long()) * near_goal.long()
+        else:
+            self.near_goal_steps += near_goal.long()
 
-        keypoint_dist = torch.norm(self.object_keypoints - self.goal_keypoints, dim=-1).mean(dim=-1)
-        keypoint_reward = self.cfg.keypoint_rew_scale * torch.exp(-10.0 * keypoint_dist)
-
-        arm_action_penalty = torch.sum(self.actions[:, :7] ** 2, dim=-1) * self.cfg.kuka_actions_penalty_scale
-        hand_action_penalty = torch.sum(self.actions[:, 7:] ** 2, dim=-1) * self.cfg.hand_actions_penalty_scale
-
-        is_success = dist_to_goal < self.cfg.success_tolerance
-        self.success_steps = torch.where(is_success, self.success_steps + 1, torch.zeros_like(self.success_steps))
-        reached_goal = self.success_steps >= self.cfg.success_steps
-        reach_bonus = self.cfg.reach_goal_bonus * reached_goal.float()
+        reached_goal = self.near_goal_steps >= self.cfg.success_steps
         self.successes += reached_goal.float()
-        self.consecutive_successes = torch.where(reached_goal, self.consecutive_successes + 1.0, self.consecutive_successes)
+        self.consecutive_successes.copy_(self.successes)
+
+        object_lin_vel_penalty = -torch.sum(torch.square(self.object_vel[:, 0:3]), dim=-1)
+        object_ang_vel_penalty = -torch.sum(torch.square(self.object_vel[:, 3:6]), dim=-1)
+        object_lin_vel_penalty *= self.cfg.object_lin_vel_penalty_scale
+        object_ang_vel_penalty *= self.cfg.object_ang_vel_penalty_scale
+
+        arm_action_penalty, hand_action_penalty = self._action_penalties()
+
+        reach_bonus = near_goal.float() * (self.cfg.reach_goal_bonus / self.cfg.success_steps)
+        if self.cfg.force_consecutive_near_goal_steps:
+            reach_bonus = reached_goal.float() * self.cfg.reach_goal_bonus
 
         reward = (
-            distance_delta_reward
+            fingertip_delta_reward
+            + hand_delta_penalty
             + lifting_reward
+            + lift_bonus_reward
             + keypoint_reward
             + reach_bonus
-            - arm_action_penalty
-            - hand_action_penalty
+            + arm_action_penalty
+            + hand_action_penalty
+            + object_lin_vel_penalty
+            + object_ang_vel_penalty
         )
         self.object_last_pos.copy_(self.object_pos)
-        self.extras["log"] = {
-            "dist_to_goal": dist_to_goal.mean(),
-            "object_lift": object_lift.mean(),
-            "success_rate": is_success.float().mean(),
+
+        success_env_ids = reached_goal.nonzero(as_tuple=False).squeeze(-1)
+        if success_env_ids.numel() > 0:
+            self._reset_goals(success_env_ids, self.object.data.root_state_w[success_env_ids].clone())
+            self.near_goal_steps[success_env_ids] = 0
+            self.closest_keypoint_max_dist[success_env_ids] = -1.0
+            if self.cfg.max_consecutive_successes > 0:
+                self.episode_length_buf[success_env_ids] = 0
+
+        reward_terms = {
+            "fingertip_delta_reward": fingertip_delta_reward.mean(),
+            "hand_delta_penalty": hand_delta_penalty.mean(),
+            "lifting_reward": lifting_reward.mean(),
+            "lift_bonus_reward": lift_bonus_reward.mean(),
+            "keypoint_reward": keypoint_reward.mean(),
+            "reach_bonus": reach_bonus.mean(),
+            "arm_action_penalty": arm_action_penalty.mean(),
+            "hand_action_penalty": hand_action_penalty.mean(),
+            "object_lin_vel_penalty": object_lin_vel_penalty.mean(),
+            "object_ang_vel_penalty": object_ang_vel_penalty.mean(),
+            "total_reward": reward.mean(),
         }
+        self.extras["log"] = {
+            "keypoints_max_dist": self.keypoints_max_dist.mean(),
+            "object_lift": (0.05 + self.object_pos[:, 2] - self.object_init_pos[:, 2]).mean(),
+            "success_rate": reached_goal.float().mean(),
+            **reward_terms,
+        }
+        self.extras["reward_terms"] = reward_terms
         return reward
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         self._compute_intermediate_values()
-        object_fell = self.object_pos[:, 2] < self.cfg.fall_distance
+        object_fell = self.object_pos[:, 2] < self.cfg.object_z_low_reset_threshold
+        hand_far_from_object = self.curr_fingertip_distances.max(dim=-1).values > self.cfg.hand_far_from_object_threshold
+        if self.cfg.reset_when_dropped:
+            dropped = (self.object_pos[:, 2] < self.object_init_pos[:, 2]) & self.lifted_object
+        else:
+            dropped = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        if self.table_contact_sensor is not None:
+            table_force_too_high = self.table_contact_force_norm > self.cfg.table_force_threshold
+        else:
+            table_force_too_high = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         too_many_successes = self.consecutive_successes >= self.cfg.max_consecutive_successes
-        return object_fell | too_many_successes, time_out
+        terminated = object_fell | too_many_successes | hand_far_from_object | dropped | table_force_too_high
+        return terminated, time_out
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None:
@@ -222,11 +308,17 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         self.prev_action_targets[env_ids] = dof_pos[:, self.actuated_dof_indices]
         self.actions[env_ids] = 0.0
         self.prev_actions[env_ids] = 0.0
-        self.success_steps[env_ids] = 0
+        self.near_goal_steps[env_ids] = 0
+        self.lifted_object[env_ids] = False
+        self.closest_fingertip_dist[env_ids] = -1.0
+        self.furthest_hand_dist[env_ids] = -1.0
+        self.closest_keypoint_max_dist[env_ids] = -1.0
+        self.successes[env_ids] = 0.0
         self.consecutive_successes[env_ids] = 0.0
 
         self._reset_goals(env_ids, object_state)
         self._compute_intermediate_values()
+        self.object_init_pos[env_ids] = self.object_pos[env_ids]
         self.object_last_pos[env_ids] = self.object_pos[env_ids]
 
     def _compute_action_targets(self) -> None:
@@ -251,14 +343,41 @@ class SimToolRealSharpaEnv(DirectRLEnv):
     def _compute_intermediate_values(self) -> None:
         self.robot_dof_pos = self.robot.data.joint_pos[:, self.actuated_dof_indices]
         self.robot_dof_vel = self.robot.data.joint_vel[:, self.actuated_dof_indices]
-        self.palm_pos = self.robot.data.body_pos_w[:, self.palm_body_idx] - self.scene.env_origins
         self.palm_rot = self.robot.data.body_quat_w[:, self.palm_body_idx]
-        self.fingertip_pos = self.robot.data.body_pos_w[:, self.fingertip_body_indices] - self.scene.env_origins[:, None, :]
+        palm_offset_w = quat_apply(self.palm_rot, self.palm_offset.unsqueeze(0).expand(self.num_envs, -1))
+        self.palm_pos = self.robot.data.body_pos_w[:, self.palm_body_idx] + palm_offset_w - self.scene.env_origins
+        fingertip_rot = self.robot.data.body_quat_w[:, self.fingertip_body_indices]
+        fingertip_offset_w = quat_apply(
+            fingertip_rot.reshape(-1, 4),
+            self.fingertip_offsets.unsqueeze(0).expand(self.num_envs, -1, -1).reshape(-1, 3),
+        ).reshape(self.num_envs, -1, 3)
+        self.fingertip_pos = (
+            self.robot.data.body_pos_w[:, self.fingertip_body_indices]
+            + fingertip_offset_w
+            - self.scene.env_origins[:, None, :]
+        )
         self.object_pos = self.object.data.root_pos_w - self.scene.env_origins
         self.object_rot = self.object.data.root_quat_w
         self.object_vel = torch.cat((self.object.data.root_lin_vel_w, self.object.data.root_ang_vel_w), dim=-1)
         self.object_keypoints = self._compute_keypoints(self.object_pos, self.object_rot)
         self.goal_keypoints = self._compute_keypoints(self.object_goal_pos, self.object_goal_rot)
+        self.fingertip_pos_rel_object = self.fingertip_pos - self.object_pos[:, None, :]
+        self.curr_fingertip_distances = torch.norm(self.fingertip_pos_rel_object, dim=-1)
+        self.closest_fingertip_dist = torch.where(
+            self.closest_fingertip_dist < 0.0, self.curr_fingertip_distances, self.closest_fingertip_dist
+        )
+        self.furthest_hand_dist = torch.where(
+            self.furthest_hand_dist < 0.0, self.curr_fingertip_distances[:, 0], self.furthest_hand_dist
+        )
+        self.keypoint_distances = torch.norm(self.object_keypoints - self.goal_keypoints, dim=-1)
+        self.keypoints_max_dist = self.keypoint_distances.max(dim=-1).values
+        self.closest_keypoint_max_dist = torch.where(
+            self.closest_keypoint_max_dist < 0.0, self.keypoints_max_dist, self.closest_keypoint_max_dist
+        )
+        if self.table_contact_sensor is not None:
+            self.table_contact_force_norm = self.table_contact_sensor.data.net_forces_w.norm(dim=-1).max(dim=-1).values
+        else:
+            self.table_contact_force_norm = torch.zeros(self.num_envs, device=self.device)
 
     def _compute_reference_observations(self) -> torch.Tensor:
         fingertip_pos_rel_palm = (self.fingertip_pos - self.palm_pos[:, None, :]).reshape(self.num_envs, -1)
@@ -322,6 +441,64 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         return offsets * half
 
     def _compute_keypoints(self, pos: torch.Tensor, quat_wxyz: torch.Tensor) -> torch.Tensor:
+        if pos.dim() == 3 and pos.shape[1] == 1:
+            pos = pos[:, 0, :]
+        if quat_wxyz.dim() == 3 and quat_wxyz.shape[1] == 1:
+            quat_wxyz = quat_wxyz[:, 0, :]
+
+        if quat_wxyz.shape[0] == 1 and pos.shape[0] > 1:
+            quat_wxyz = quat_wxyz.expand(pos.shape[0], -1)
+        elif quat_wxyz.shape[0] != pos.shape[0]:
+            raise RuntimeError(
+                f"Keypoint batch mismatch: pos shape={tuple(pos.shape)}, quat shape={tuple(quat_wxyz.shape)}"
+            )
+
         offsets = self.keypoint_offsets.unsqueeze(0).expand(pos.shape[0], -1, -1)
-        quat = quat_wxyz[:, None, :].expand(-1, offsets.shape[1], -1)
-        return pos[:, None, :] + quat_apply(quat, offsets)
+        quat = quat_wxyz.unsqueeze(1).expand(-1, offsets.shape[1], -1)
+        rotated_offsets = quat_apply(quat.reshape(-1, 4), offsets.reshape(-1, 3)).reshape(pos.shape[0], -1, 3)
+        return pos.unsqueeze(1) + rotated_offsets
+
+    def _distance_delta_rewards(self, lifted_object: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        fingertip_deltas_closest = self.closest_fingertip_dist - self.curr_fingertip_distances
+        self.closest_fingertip_dist = torch.minimum(self.closest_fingertip_dist, self.curr_fingertip_distances)
+
+        hand_deltas_furthest = self.furthest_hand_dist - self.curr_fingertip_distances[:, 0]
+        self.furthest_hand_dist = torch.maximum(self.furthest_hand_dist, self.curr_fingertip_distances[:, 0])
+
+        fingertip_deltas = torch.clamp(fingertip_deltas_closest, 0.0, 10.0) * self.finger_rew_coeffs
+        fingertip_delta_reward = torch.sum(fingertip_deltas, dim=-1) * (~lifted_object)
+
+        hand_delta_penalty = torch.clamp(hand_deltas_furthest, -10.0, 0.0) * (~lifted_object)
+        hand_delta_penalty = hand_delta_penalty * self.fingertip_offsets.shape[0]
+
+        fingertip_delta_reward = fingertip_delta_reward * self.cfg.distance_delta_rew_scale
+        hand_delta_penalty = hand_delta_penalty * 0.0
+        return fingertip_delta_reward, hand_delta_penalty
+
+    def _lifting_reward(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        z_lift = 0.05 + self.object_pos[:, 2] - self.object_init_pos[:, 2]
+        lifting_reward = torch.clamp(z_lift, 0.0, 0.5)
+
+        lifted_object = (z_lift > self.cfg.lifting_bonus_threshold) | self.lifted_object
+        just_lifted = lifted_object & (~self.lifted_object)
+        lift_bonus_reward = self.cfg.lifting_bonus * just_lifted.float()
+        lifting_reward = lifting_reward * (~lifted_object)
+
+        self.lifted_object = lifted_object
+        lifting_reward = lifting_reward * self.cfg.lifting_rew_scale
+        return lifting_reward, lift_bonus_reward, lifted_object
+
+    def _keypoint_reward(self, lifted_object: torch.Tensor) -> torch.Tensor:
+        keypoint_deltas = self.closest_keypoint_max_dist - self.keypoints_max_dist
+        self.closest_keypoint_max_dist = torch.minimum(self.closest_keypoint_max_dist, self.keypoints_max_dist)
+        keypoint_deltas = torch.clamp(keypoint_deltas, 0.0, 100.0)
+        return keypoint_deltas * lifted_object * self.cfg.keypoint_rew_scale
+
+    def _action_penalties(self) -> tuple[torch.Tensor, torch.Tensor]:
+        kuka_actions_penalty = (
+            torch.sum(torch.abs(self.robot_dof_vel[:, :7]), dim=-1) * self.cfg.kuka_actions_penalty_scale
+        )
+        hand_actions_penalty = (
+            torch.sum(torch.abs(self.robot_dof_vel[:, 7:]), dim=-1) * self.cfg.hand_actions_penalty_scale
+        )
+        return -kuka_actions_penalty, -hand_actions_penalty

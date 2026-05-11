@@ -15,6 +15,7 @@ URDF_PATH = os.path.join(
     "kuka_sharpa_description",
     "iiwa14_left_sharpa_adjusted_restricted.urdf",
 )
+USD_PATH = os.path.join(MODULE_PATH, "kuka_sharpa.usd")
 
 # Keep this order aligned with reference.isaacgymenvs.utils.observation_action_utils_sharpa.
 KUKA_SHARPA_JOINT_NAMES = [
@@ -53,12 +54,8 @@ _ARM_JOINT_RE = "iiwa14_joint_[1-7]"
 _HAND_JOINT_RE = "left_.*"
 
 KUKA_SHARPA_CFG = ArticulationCfg(
-    spawn=sim_utils.UrdfFileCfg(
-        asset_path=URDF_PATH,
-        fix_base=True,
-        merge_fixed_joints=False,
-        make_instanceable=False,
-        self_collision=True,
+    spawn=sim_utils.UsdFileCfg(
+        usd_path=USD_PATH,
         activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=True,
@@ -75,20 +72,6 @@ KUKA_SHARPA_CFG = ArticulationCfg(
             solver_velocity_iteration_count=2,
             sleep_threshold=0.005,
             stabilization_threshold=0.0005,
-        ),
-        joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
-            drive_type="force",
-            target_type="position",
-            gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(
-                stiffness={
-                    _ARM_JOINT_RE: 300.0,
-                    _HAND_JOINT_RE: 3.0,
-                },
-                damping={
-                    _ARM_JOINT_RE: 30.0,
-                    _HAND_JOINT_RE: 0.1,
-                },
-            ),
         ),
     ),
     init_state=ArticulationCfg.InitialStateCfg(

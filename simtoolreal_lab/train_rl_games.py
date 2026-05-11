@@ -28,6 +28,9 @@ AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 if args_cli.video:
     args_cli.enable_cameras = True
+TASK_OUTPUT_ROOT = pathlib.Path(__file__).resolve().parent / "tasks" / "simtoolreal_sharpa"
+if not any(arg.startswith("hydra.run.dir=") for arg in hydra_args):
+    hydra_args.append(f"hydra.run.dir={TASK_OUTPUT_ROOT / 'outputs'}/${{now:%Y-%m-%d}}/${{now:%H-%M-%S}}")
 sys.argv = [sys.argv[0]] + hydra_args
 
 app_launcher = AppLauncher(args_cli)
@@ -51,6 +54,7 @@ from isaaclab_rl.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import simtoolreal_lab.tasks.simtoolreal_sharpa.gym_setup  # noqa: F401
+from simtoolreal_lab.tasks.simtoolreal_sharpa.simtoolreal_sharpa_env_cfg import apply_object_selection
 
 
 @hydra_task_config(args_cli.task, "rl_games_cfg_entry_point")
@@ -62,10 +66,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    apply_object_selection(env_cfg)
     agent_cfg["params"]["seed"] = args_cli.seed if args_cli.seed is not None else agent_cfg["params"]["seed"]
     agent_cfg["params"]["config"]["max_epochs"] = (
         args_cli.max_iterations if args_cli.max_iterations is not None else agent_cfg["params"]["config"]["max_epochs"]
     )
+    expl_type = agent_cfg["params"]["config"].get("expl_type", "none")
+    continuous_space_cfg = agent_cfg["params"]["network"]["space"]["continuous"]
+    if not str(expl_type).startswith("mixed_expl") and continuous_space_cfg.get("fixed_sigma") == "coef_cond":
+        print("[INFO]: Setting fixed_sigma='fixed' because coef_cond requires mixed_expl coefficient IDs.")
+        continuous_space_cfg["fixed_sigma"] = "fixed"
 
     resume_path = None
     if args_cli.checkpoint is not None:
@@ -83,8 +93,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env_cfg.sim.device = f"cuda:{app_launcher.local_rank}"
 
     env_cfg.seed = agent_cfg["params"]["seed"]
-    task_log_root = pathlib.Path(__file__).resolve().parent / "tasks" / "simtoolreal_sharpa" / "logs" / "rl_games"
-    log_root_path = str((task_log_root / agent_cfg["params"]["config"]["name"]).resolve())
+    log_root_path = str((TASK_OUTPUT_ROOT / "logs").resolve())
     # The reference SAPO RL-Games fork parses the leading token as policy_idx.
     log_dir = agent_cfg["params"]["config"].get("full_experiment_name", f"0_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}")
     agent_cfg["params"]["config"]["train_dir"] = log_root_path
@@ -117,6 +126,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     vecenv.register("IsaacRlgWrapper", lambda config_name, num_actors, **kwargs: RlGamesGpuEnv(config_name, num_actors, **kwargs))
     env_configurations.register("rlgpu", {"vecenv_type": "IsaacRlgWrapper", "env_creator": lambda **kwargs: env})
     agent_cfg["params"]["config"]["num_actors"] = env.unwrapped.num_envs
+    batch_size = env.unwrapped.num_envs * agent_cfg["params"]["config"]["horizon_length"]
+    if agent_cfg["params"]["config"]["minibatch_size"] > batch_size:
+        print(f"[INFO]: Setting minibatch_size={batch_size} for batch_size={batch_size}.")
+        agent_cfg["params"]["config"]["minibatch_size"] = batch_size
+    central_value_config = agent_cfg["params"]["config"].get("central_value_config")
+    if central_value_config is not None and central_value_config.get("minibatch_size", batch_size) > batch_size:
+        minibatch_size = min(agent_cfg["params"]["config"]["minibatch_size"], batch_size)
+        print(
+            f"[INFO]: Setting central_value_config.minibatch_size={minibatch_size} "
+            f"for batch_size={batch_size}."
+        )
+        central_value_config["minibatch_size"] = minibatch_size
 
     print(f"[INFO] Using rl_games from: {sys.modules['rl_games'].__file__}")
     runner = Runner(IsaacAlgoObserver())

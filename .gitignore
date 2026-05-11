@@ -49,3 +49,4 @@ simtoolreal_lab/assets/kuka_sharpa/**/*.usd
 assets/
 dextoolbench/
 pretrained_policy/
+outputs/
