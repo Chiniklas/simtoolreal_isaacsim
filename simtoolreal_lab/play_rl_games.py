@@ -15,6 +15,7 @@ parser.add_argument("--num_envs", type=int, default=None, help="Number of enviro
 parser.add_argument("--task", type=str, default=None, help="Gym task id.")
 parser.add_argument("--checkpoint", type=str, required=True, help="Path to checkpoint.")
 parser.add_argument("--object", type=str, default=None, help="DexToolBench object name to replay with.")
+parser.add_argument("--debug_keypoints", action="store_true", default=False, help="Visualize object and goal keypoints.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -38,7 +39,7 @@ from isaaclab_tasks.utils import load_cfg_from_registry, parse_env_cfg
 from isaaclab_rl.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper
 
 import simtoolreal_lab.tasks.simtoolreal_sharpa.gym_setup  # noqa: F401
-from simtoolreal_lab.tasks.simtoolreal_sharpa.simtoolreal_sharpa_env_cfg import configure_dextoolbench_object
+from simtoolreal_lab.tasks.simtoolreal_sharpa.simtoolreal_sharpa_env_cfg import apply_object_selection
 
 
 def _player_obs(obs: torch.Tensor | dict[str, torch.Tensor], player: BasePlayer) -> torch.Tensor:
@@ -63,12 +64,29 @@ def _restore_policy_only(player: BasePlayer, checkpoint_path: str) -> None:
     player.loaded_checkpoint = checkpoint_path
 
 
+def _checkpoint_success_tolerance(checkpoint_path: str) -> float | None:
+    """Return the saved environment success tolerance when present in a checkpoint."""
+    checkpoint = torch_ext.load_checkpoint(checkpoint_path)
+    if 0 in checkpoint:
+        checkpoint = checkpoint[0]
+    env_state = checkpoint.get("env_state", {})
+    success_tolerance = env_state.get("success_tolerance")
+    if success_tolerance is None:
+        return None
+    return float(success_tolerance)
+
+
 def main():
     env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs, use_fabric=not args_cli.disable_fabric)
-    if args_cli.object is not None:
-        configure_dextoolbench_object(env_cfg, args_cli.object)
-    agent_cfg = load_cfg_from_registry(args_cli.task, "rl_games_cfg_entry_point")
     resume_path = retrieve_file_path(args_cli.checkpoint)
+    checkpoint_success_tolerance = _checkpoint_success_tolerance(resume_path)
+    if checkpoint_success_tolerance is not None:
+        env_cfg.success_tolerance = checkpoint_success_tolerance
+    if args_cli.object is not None:
+        env_cfg.object_name = args_cli.object
+    env_cfg.debug_keypoints = args_cli.debug_keypoints
+    apply_object_selection(env_cfg)
+    agent_cfg = load_cfg_from_registry(args_cli.task, "rl_games_cfg_entry_point")
     agent_cfg["params"]["load_checkpoint"] = True
     agent_cfg["params"]["load_path"] = resume_path
 

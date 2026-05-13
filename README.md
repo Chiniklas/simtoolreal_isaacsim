@@ -121,15 +121,21 @@ Enable the customized SAPO / mixed-exploration path with:
 ```bash
 python simtoolreal_lab/train_rl_games.py \
   --task simtoolreal_sharpa \
-  --num_envs 512 \
+  --num_envs 1536 \
   --headless \
-  agent.params.config.expl_type=mixed_expl \
+  agent.params.config.expl_type=mixed_expl_learn_param \
   agent.params.config.use_others_experience=lf \
   agent.params.config.off_policy_ratio=1.0 \
   agent.params.config.expl_reward_type=entropy \
-  agent.params.config.expl_coef_block_size=512 \
+  agent.params.config.expl_coef_block_size=256 \
   agent.wandb_activate=False
 ```
+
+This keeps `num_envs / expl_coef_block_size = 6`, matching the pretrained
+policy architecture (`a2c_network.sigma` shape `6 x 29` plus learned
+`extra_params`). The reference training launcher defaults to `24576` envs, but
+this smaller setting keeps the same six-block SAPO structure while fitting on
+single-GPU setups with roughly 1000-ish environments.
 
 Hydra output and RL-Games training logs are written inside the task directory:
 

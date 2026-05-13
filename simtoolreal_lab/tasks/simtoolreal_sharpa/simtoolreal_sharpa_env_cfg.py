@@ -47,6 +47,23 @@ def _object_rigid_props() -> sim_utils.RigidBodyPropertiesCfg:
     )
 
 
+def _goal_rigid_props() -> sim_utils.RigidBodyPropertiesCfg:
+    return sim_utils.RigidBodyPropertiesCfg(
+        kinematic_enabled=False,
+        disable_gravity=True,
+        enable_gyroscopic_forces=True,
+        solver_position_iteration_count=8,
+        solver_velocity_iteration_count=2,
+        sleep_threshold=0.005,
+        stabilization_threshold=0.0025,
+        max_depenetration_velocity=100.0,
+    )
+
+
+def _goal_collision_props() -> sim_utils.CollisionPropertiesCfg:
+    return sim_utils.CollisionPropertiesCfg(collision_enabled=False)
+
+
 def make_cube_object_cfg(mass: float) -> RigidObjectCfg:
     return RigidObjectCfg(
         prim_path="/World/envs/env_.*/object",
@@ -59,6 +76,21 @@ def make_cube_object_cfg(mass: float) -> RigidObjectCfg:
             physics_material=RigidBodyMaterialCfg(static_friction=0.5, dynamic_friction=0.5),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.63), rot=(1.0, 0.0, 0.0, 0.0)),
+    )
+
+
+def make_cube_goal_object_cfg(mass: float) -> RigidObjectCfg:
+    return RigidObjectCfg(
+        prim_path="/World/envs/env_.*/goal_object",
+        spawn=sim_utils.CuboidCfg(
+            size=(0.04, 0.04, 0.04),
+            rigid_props=_goal_rigid_props(),
+            mass_props=sim_utils.MassPropertiesCfg(mass=mass),
+            collision_props=_goal_collision_props(),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 1.0, 0.0)),
+            physics_material=RigidBodyMaterialCfg(static_friction=0.5, dynamic_friction=0.5),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(-0.35, -0.06, 0.71), rot=(1.0, 0.0, 0.0, 0.0)),
     )
 
 
@@ -79,6 +111,27 @@ def make_dextoolbench_object_cfg(object_name: str, mass: float) -> RigidObjectCf
             collision_props=sim_utils.CollisionPropertiesCfg(),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.63), rot=(1.0, 0.0, 0.0, 0.0)),
+    )
+
+
+def make_dextoolbench_goal_object_cfg(object_name: str, mass: float) -> RigidObjectCfg:
+    usd_path = DEXTOOLBENCH_USD_DIR / object_name / f"{object_name}.usd"
+    if object_name not in DEXTOOLBENCH_OBJECT_SCALES:
+        known = ", ".join(sorted(DEXTOOLBENCH_OBJECT_SCALES))
+        raise ValueError(f"Unknown DexToolBench object '{object_name}'. Known objects: {known}")
+    if not usd_path.exists():
+        raise FileNotFoundError(f"Missing USD for DexToolBench object '{object_name}': {usd_path}")
+
+    return RigidObjectCfg(
+        prim_path="/World/envs/env_.*/goal_object",
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=str(usd_path),
+            rigid_props=_goal_rigid_props(),
+            mass_props=sim_utils.MassPropertiesCfg(mass=mass),
+            collision_props=_goal_collision_props(),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 1.0, 0.0)),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(-0.35, -0.06, 0.71), rot=(1.0, 0.0, 0.0, 0.0)),
     )
 
 
@@ -106,9 +159,35 @@ def make_multi_dextoolbench_object_cfg(object_names: list[str], mass: float) -> 
     )
 
 
+def make_multi_dextoolbench_goal_object_cfg(object_names: list[str], mass: float) -> RigidObjectCfg:
+    usd_paths: list[str] = []
+    for object_name in object_names:
+        usd_path = DEXTOOLBENCH_USD_DIR / object_name / f"{object_name}.usd"
+        if object_name not in DEXTOOLBENCH_OBJECT_SCALES:
+            known = ", ".join(sorted(DEXTOOLBENCH_OBJECT_SCALES))
+            raise ValueError(f"Unknown DexToolBench object '{object_name}'. Known objects: {known}")
+        if not usd_path.exists():
+            raise FileNotFoundError(f"Missing USD for DexToolBench object '{object_name}': {usd_path}")
+        usd_paths.append(str(usd_path))
+
+    return RigidObjectCfg(
+        prim_path="/World/envs/env_.*/goal_object",
+        spawn=sim_utils.MultiUsdFileCfg(
+            usd_path=usd_paths,
+            random_choice=False,
+            rigid_props=_goal_rigid_props(),
+            mass_props=sim_utils.MassPropertiesCfg(mass=mass),
+            collision_props=_goal_collision_props(),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 1.0, 0.0)),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(-0.35, -0.06, 0.71), rot=(1.0, 0.0, 0.0, 0.0)),
+    )
+
+
 def configure_cube_object(cfg: "SimToolRealSharpaEnvCfg") -> None:
     cfg.object_name = "cube"
     cfg.object_cfg = make_cube_object_cfg(cfg.object_mass)
+    cfg.goal_object_cfg = make_cube_goal_object_cfg(cfg.object_mass)
     cfg.object_scales = (1.0, 1.0, 1.0)
     cfg.scene.replicate_physics = True
 
@@ -116,6 +195,7 @@ def configure_cube_object(cfg: "SimToolRealSharpaEnvCfg") -> None:
 def configure_dextoolbench_object(cfg: "SimToolRealSharpaEnvCfg", object_name: str) -> None:
     cfg.object_name = object_name
     cfg.object_cfg = make_dextoolbench_object_cfg(object_name, cfg.object_mass)
+    cfg.goal_object_cfg = make_dextoolbench_goal_object_cfg(object_name, cfg.object_mass)
     cfg.object_scales = DEXTOOLBENCH_OBJECT_SCALES[object_name]
 
 
@@ -123,6 +203,7 @@ def configure_multi_dextoolbench_objects(cfg: "SimToolRealSharpaEnvCfg", object_
     cfg.object_name = "multi_dextoolbench"
     cfg.multi_object_names = tuple(object_names)
     cfg.object_cfg = make_multi_dextoolbench_object_cfg(object_names, cfg.object_mass)
+    cfg.goal_object_cfg = make_multi_dextoolbench_goal_object_cfg(object_names, cfg.object_mass)
     cfg.object_scales = DEXTOOLBENCH_OBJECT_SCALES[object_names[0]]
 
 
@@ -209,6 +290,7 @@ class SimToolRealSharpaEnvCfg(DirectRLEnvCfg):
     )
     object_mass = 0.05
     object_cfg: RigidObjectCfg = make_cube_object_cfg(object_mass)
+    goal_object_cfg: RigidObjectCfg = make_cube_goal_object_cfg(object_mass)
 
     # reset/control
     clamp_abs_observations = 10.0
@@ -223,6 +305,10 @@ class SimToolRealSharpaEnvCfg(DirectRLEnvCfg):
     reset_dof_pos_noise_arm = 0.1
     reset_dof_vel_noise = 0.5
     randomize_object_rotation = True
+    object_start_pose: tuple[float, float, float, float, float, float, float] | None = None
+    goal_object_pose: tuple[float, float, float, float, float, float, float] | None = None
+    debug_keypoints = False
+    debug_keypoint_radius = 0.012
 
     # reference task geometry
     table_top_z = 0.53
