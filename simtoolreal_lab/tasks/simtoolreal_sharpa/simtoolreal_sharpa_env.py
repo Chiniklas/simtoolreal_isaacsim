@@ -69,10 +69,13 @@ class SimToolRealSharpaEnv(DirectRLEnv):
                 [DEXTOOLBENCH_OBJECT_SCALES[name] for name in self.cfg.multi_object_names], device=self.device
             )
             object_ids = torch.arange(self.num_envs, device=self.device) % per_object_scales.shape[0]
-            self.object_scales = per_object_scales[object_ids]
+            self.object_base_scales = per_object_scales[object_ids]
         else:
-            self.object_scales = torch.tensor(self.cfg.object_scales, device=self.device).repeat(self.num_envs, 1)
+            self.object_base_scales = torch.tensor(self.cfg.object_scales, device=self.device).repeat(self.num_envs, 1)
+        self.object_scale_noise_multiplier = torch.ones((self.num_envs, 3), device=self.device)
+        self.object_scales = self.object_base_scales * self.object_scale_noise_multiplier
         self.object_init_pos = torch.zeros(self.num_envs, 3, device=self.device)
+        self.object_drop_height = torch.zeros(self.num_envs, device=self.device)
         self.object_last_pos = torch.zeros(self.num_envs, 3, device=self.device)
         self.successes = torch.zeros(self.num_envs, device=self.device)
         self.consecutive_successes = torch.zeros(self.num_envs, device=self.device)
@@ -87,19 +90,26 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         self.keypoint_offsets = self._make_keypoint_offsets()
         self.keypoint_debug_draw = self._make_keypoint_debug_draw() if self.cfg.debug_keypoints else None
         self._all_env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+        self._setup_object_disturbances()
         self._compute_intermediate_values()
 
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot_cfg)
         self.table = RigidObject(self.cfg.table_cfg)
-        self.object = RigidObject(self.cfg.object_cfg)
-        self.goal_object = RigidObject(self.cfg.goal_object_cfg)
+        if self.cfg.object_name == "multi_dextoolbench":
+            self.object = self._make_multi_dextoolbench_object(self.cfg.object_cfg)
+            self.goal_object = self._make_multi_dextoolbench_object(self.cfg.goal_object_cfg)
+        else:
+            self.object = RigidObject(self.cfg.object_cfg)
+            self.goal_object = RigidObject(self.cfg.goal_object_cfg)
         self.table_contact_sensor = None
         if self.cfg.with_table_force_sensor:
             self.table_contact_sensor = ContactSensor(self.cfg.table_contact_sensor)
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
         if self.scene.cfg.replicate_physics:
             self.scene.clone_environments(copy_from_source=False)
+        if not self.scene.cfg.replicate_physics or self.device == "cpu":
+            self.scene.filter_collisions(global_prim_paths=["/World/ground"])
         self._disable_goal_object_collisions()
         self.scene.articulations["robot"] = self.robot
         self.scene.rigid_objects["table"] = self.table
@@ -109,6 +119,31 @@ class SimToolRealSharpaEnv(DirectRLEnv):
             self.scene.sensors["table_contact_sensor"] = self.table_contact_sensor
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
+
+    def _make_multi_dextoolbench_object(self, cfg) -> RigidObject:
+        cfg.spawn.func(
+            cfg.prim_path,
+            cfg.spawn,
+            translation=cfg.init_state.pos,
+            orientation=cfg.init_state.rot,
+        )
+        self._reroot_multi_usd_rigid_bodies(cfg.prim_path)
+        return RigidObject(cfg.replace(spawn=None))
+
+    def _reroot_multi_usd_rigid_bodies(self, prim_path: str) -> None:
+        for parent_prim in sim_utils.find_matching_prims(prim_path):
+            parent_path = parent_prim.GetPath().pathString
+            root_prims = sim_utils.get_all_matching_child_prims(
+                parent_path, predicate=lambda prim: prim.HasAPI(UsdPhysics.RigidBodyAPI)
+            )
+            if len(root_prims) != 1:
+                continue
+            root_prim = root_prims[0]
+            if root_prim.GetPath() == parent_prim.GetPath():
+                continue
+            if not parent_prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                UsdPhysics.RigidBodyAPI.Apply(parent_prim)
+            root_prim.RemoveAPI(UsdPhysics.RigidBodyAPI)
 
     def _disable_goal_object_collisions(self) -> None:
         stage = sim_utils.get_current_stage()
@@ -153,6 +188,7 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         self._compute_action_targets()
 
     def _apply_action(self) -> None:
+        self._update_object_disturbances()
         self.robot.set_joint_position_target(
             self.dof_pos_targets[:, self.actuated_dof_indices], joint_ids=self.actuated_dof_indices
         )
@@ -261,7 +297,7 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         object_fell = self.object_pos[:, 2] < self.cfg.object_z_low_reset_threshold
         hand_far_from_object = self.curr_fingertip_distances.max(dim=-1).values > self.cfg.hand_far_from_object_threshold
         if self.cfg.reset_when_dropped:
-            dropped = (self.object_pos[:, 2] < self.object_init_pos[:, 2]) & self.lifted_object
+            dropped = (self.object_pos[:, 2] < self.object_drop_height) & self.lifted_object
         else:
             dropped = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         if self.table_contact_sensor is not None:
@@ -280,6 +316,15 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         super()._reset_idx(env_ids)
 
         num_ids = env_ids.shape[0]
+        table_state = self.table.data.default_root_state[env_ids].clone()
+        table_reset_z = (
+            self.cfg.table_cfg.init_state.pos[2]
+            + sample_uniform(-self.cfg.table_reset_z_range, self.cfg.table_reset_z_range, (num_ids,), self.device)
+        )
+        table_state[:, 2] = table_reset_z + self.scene.env_origins[env_ids, 2]
+        table_state[:, 7:13] = 0.0
+        self.table.write_root_state_to_sim(table_state, env_ids)
+
         object_state = self.object.data.default_root_state[env_ids].clone()
         xy_noise = torch.stack(
             (
@@ -291,32 +336,29 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         z_noise = sample_uniform(-self.cfg.reset_position_noise_z, self.cfg.reset_position_noise_z, (num_ids,), self.device)
         object_state[:, 0] = xy_noise[:, 0]
         object_state[:, 1] = xy_noise[:, 1]
-        object_state[:, 2] = self.cfg.table_cfg.init_state.pos[2] + self.cfg.table_object_z_offset + z_noise
+        object_drop_height = table_reset_z + self.cfg.table_object_z_offset
+        object_state[:, 2] = object_drop_height + z_noise
         object_state[:, 0:3] += self.scene.env_origins[env_ids]
         object_state[:, 3:7] = self._sample_object_quat(num_ids)
         if self.cfg.object_start_pose is not None:
             object_start_pose = torch.tensor(self.cfg.object_start_pose, device=self.device, dtype=object_state.dtype)
             object_state[:, 0:3] = object_start_pose[0:3] + self.scene.env_origins[env_ids]
             object_state[:, 3:7] = object_start_pose[[6, 3, 4, 5]]
+            object_drop_height = object_start_pose[2].expand(num_ids)
         object_state[:, 7:13] = 0.0
         self.object.write_root_state_to_sim(object_state, env_ids)
 
         dof_pos = self.robot_start_joint_pos[env_ids].clone()
         dof_vel = self.robot_start_joint_vel[env_ids].clone()
-        arm_noise = sample_uniform(
-            -self.cfg.reset_dof_pos_noise_arm,
-            self.cfg.reset_dof_pos_noise_arm,
-            (num_ids, 7),
-            self.device,
-        )
-        hand_noise = sample_uniform(
-            -self.cfg.reset_dof_pos_noise_fingers,
-            self.cfg.reset_dof_pos_noise_fingers,
-            (num_ids, self.num_actions - 7),
-            self.device,
-        )
-        dof_pos[:, self.actuated_dof_indices[:7]] += arm_noise
-        dof_pos[:, self.actuated_dof_indices[7:]] += hand_noise
+        default_targets = dof_pos[:, self.actuated_dof_indices]
+        delta_max = self.robot_dof_upper_limits[env_ids] - default_targets
+        delta_min = self.robot_dof_lower_limits[env_ids] - default_targets
+        rand_dof = sample_uniform(0.0, 1.0, (num_ids, self.num_actions), self.device)
+        rand_delta = delta_min + (delta_max - delta_min) * rand_dof
+        noise_coeff = torch.empty_like(default_targets)
+        noise_coeff[:, :7] = self.cfg.reset_dof_pos_noise_arm
+        noise_coeff[:, 7:] = self.cfg.reset_dof_pos_noise_fingers
+        dof_pos[:, self.actuated_dof_indices] = default_targets + noise_coeff * rand_delta
         dof_pos[:, self.actuated_dof_indices] = saturate(
             dof_pos[:, self.actuated_dof_indices],
             self.robot_dof_lower_limits[env_ids],
@@ -337,6 +379,8 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         self.prev_actions[env_ids] = 0.0
         self.near_goal_steps[env_ids] = 0
         self.lifted_object[env_ids] = False
+        self._reset_object_scale_noise(env_ids)
+        self._reset_object_disturbances(env_ids)
         self.closest_fingertip_dist[env_ids] = -1.0
         self.furthest_hand_dist[env_ids] = -1.0
         self.closest_keypoint_max_dist[env_ids] = -1.0
@@ -344,6 +388,7 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         self.consecutive_successes[env_ids] = 0.0
 
         self.object_init_pos[env_ids] = object_state[:, 0:3] - self.scene.env_origins[env_ids]
+        self.object_drop_height[env_ids] = object_drop_height
         self._reset_goals(env_ids, is_first_goal=True)
         self._compute_intermediate_values()
         self.object_init_pos[env_ids] = self.object_pos[env_ids]
@@ -367,6 +412,85 @@ class SimToolRealSharpaEnv(DirectRLEnv):
             )
         self.prev_action_targets.copy_(targets)
         self.dof_pos_targets[:, self.actuated_dof_indices] = targets
+
+    def _sample_log_uniform(self, min_value: float, max_value: float, shape: tuple[int, ...]) -> torch.Tensor:
+        if min_value <= 0.0 or max_value <= 0.0:
+            return torch.zeros(shape, device=self.device)
+        log_min = math.log(min_value)
+        log_max = math.log(max_value)
+        return torch.exp(sample_uniform(log_min, log_max, shape, self.device))
+
+    def _setup_object_disturbances(self) -> None:
+        masses = self.object.root_physx_view.get_masses().to(self.device)
+        self.object_body_masses = masses.unsqueeze(-1)
+        self.object_forces = torch.zeros((self.num_envs, self.object.num_bodies, 3), device=self.device)
+        self.object_torques = torch.zeros_like(self.object_forces)
+        self.random_force_prob = self._sample_log_uniform(
+            self.cfg.force_prob_range[0], self.cfg.force_prob_range[1], (self.num_envs,)
+        )
+        self.random_torque_prob = self._sample_log_uniform(
+            self.cfg.torque_prob_range[0], self.cfg.torque_prob_range[1], (self.num_envs,)
+        )
+
+    def _reset_object_scale_noise(self, env_ids: torch.Tensor) -> None:
+        noise_min, noise_max = self.cfg.object_scale_noise_multiplier_range
+        self.object_scale_noise_multiplier[env_ids] = sample_uniform(
+            noise_min,
+            noise_max,
+            (env_ids.shape[0], 3),
+            self.device,
+        )
+        self.object_scales[env_ids] = self.object_base_scales[env_ids] * self.object_scale_noise_multiplier[env_ids]
+
+    def _reset_object_disturbances(self, env_ids: torch.Tensor) -> None:
+        self.object_forces[env_ids] = 0.0
+        self.object_torques[env_ids] = 0.0
+        self.random_force_prob[env_ids] = self._sample_log_uniform(
+            self.cfg.force_prob_range[0], self.cfg.force_prob_range[1], (env_ids.shape[0],)
+        )
+        self.random_torque_prob[env_ids] = self._sample_log_uniform(
+            self.cfg.torque_prob_range[0], self.cfg.torque_prob_range[1], (env_ids.shape[0],)
+        )
+
+    def _update_object_disturbances(self) -> None:
+        if self.cfg.force_scale <= 0.0 and self.cfg.torque_scale <= 0.0:
+            self.object.set_external_force_and_torque(
+                torch.zeros(0, 3, device=self.device),
+                torch.zeros(0, 3, device=self.device),
+            )
+            return
+
+        if self.cfg.force_scale > 0.0:
+            decay = float(self.cfg.force_decay) ** (self.step_dt / max(float(self.cfg.force_decay_interval), 1.0e-6))
+            self.object_forces *= decay
+            force_env_ids = (torch.rand(self.num_envs, device=self.device) < self.random_force_prob).nonzero(as_tuple=False).squeeze(-1)
+            if force_env_ids.numel() > 0:
+                self.object_forces[force_env_ids] = (
+                    torch.randn((force_env_ids.numel(), self.object.num_bodies, 3), device=self.device)
+                    * self.object_body_masses[force_env_ids]
+                    * self.cfg.force_scale
+                )
+            if self.cfg.force_only_when_lifted:
+                self.object_forces *= self.lifted_object[:, None, None]
+        else:
+            self.object_forces.zero_()
+
+        if self.cfg.torque_scale > 0.0:
+            decay = float(self.cfg.torque_decay) ** (self.step_dt / max(float(self.cfg.torque_decay_interval), 1.0e-6))
+            self.object_torques *= decay
+            torque_env_ids = (torch.rand(self.num_envs, device=self.device) < self.random_torque_prob).nonzero(as_tuple=False).squeeze(-1)
+            if torque_env_ids.numel() > 0:
+                self.object_torques[torque_env_ids] = (
+                    torch.randn((torque_env_ids.numel(), self.object.num_bodies, 3), device=self.device)
+                    * self.object_body_masses[torque_env_ids]
+                    * self.cfg.torque_scale
+                )
+            if self.cfg.torque_only_when_lifted:
+                self.object_torques *= self.lifted_object[:, None, None]
+        else:
+            self.object_torques.zero_()
+
+        self.object.set_external_force_and_torque(self.object_forces, self.object_torques, is_global=False)
 
     def _compute_intermediate_values(self) -> None:
         self.robot_dof_pos = self.robot.data.joint_pos[:, self.actuated_dof_indices]
@@ -437,8 +561,7 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         num_ids = env_ids.shape[0]
         goal_state = self.goal_object.data.default_root_state[env_ids].clone()
 
-        mins = torch.tensor(self.cfg.target_volume_mins, device=self.device)
-        maxs = torch.tensor(self.cfg.target_volume_maxs, device=self.device)
+        mins, maxs = self._target_volume_bounds()
 
         if (not is_first_goal) and self.cfg.goal_sampling_type == "delta":
             current_goal_pos = self.object_goal_pos[env_ids]
@@ -468,7 +591,7 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         else:
             goal_pos = sample_uniform(0.0, 1.0, (num_ids, 3), self.device) * (maxs - mins) + mins
             goal_rot = self._sample_random_quat(num_ids)
-            min_z = self.object_init_pos[env_ids, 2:3] - 0.05 + self.cfg.lifting_bonus_threshold
+            min_z = self.object_drop_height[env_ids, None] - 0.05 + self.cfg.lifting_bonus_threshold
             goal_pos[:, 2:3] = torch.max(min_z, goal_pos[:, 2:3])
 
         self.object_goal_pos[env_ids] = goal_pos
@@ -485,13 +608,18 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         goal_state[:, 7:13] = 0.0
         self.goal_object.write_root_state_to_sim(goal_state, env_ids)
 
+    def _target_volume_bounds(self) -> tuple[torch.Tensor, torch.Tensor]:
+        mins = torch.tensor(self.cfg.target_volume_mins, device=self.device)
+        maxs = torch.tensor(self.cfg.target_volume_maxs, device=self.device)
+        center = (mins + maxs) * 0.5
+        half_range = (maxs - mins) * 0.5 * self.cfg.target_volume_region_scale
+        return center - half_range, center + half_range
+
     def _sample_object_quat(self, num_ids: int) -> torch.Tensor:
         quat = torch.zeros(num_ids, 4, device=self.device)
         quat[:, 0] = 1.0
         if self.cfg.randomize_object_rotation:
-            angle = sample_uniform(-math.pi, math.pi, (num_ids,), self.device)
-            z_axis = torch.tensor([0.0, 0.0, 1.0], device=self.device).repeat(num_ids, 1)
-            quat = quat_from_angle_axis(angle, z_axis)
+            quat = self._sample_random_quat(num_ids)
         return quat
 
     def _sample_random_quat(self, num_ids: int) -> torch.Tensor:

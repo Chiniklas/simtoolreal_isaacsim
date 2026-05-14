@@ -50,3 +50,4 @@ assets/
 dextoolbench/
 pretrained_policy/
 outputs/
+*.mp4

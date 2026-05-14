@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import select
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -253,6 +255,13 @@ class MujocoEnvNoRosArgs:
     sim_hz: float = 600.0
     control_hz: float = 60.0
     show_robot_collision_overlay: bool = True
+    press_enter_to_execute: bool = False
+    record_video: bool = False
+    video_path: Path = Path("mujoco_rollout.mp4")
+    video_fps: float = 30.0
+    video_width: int = 1280
+    video_height: int = 720
+    video_camera: str = "side_table"
 
 
 def _object_scales(object_name: str) -> np.ndarray:
@@ -266,6 +275,100 @@ def _object_scales(object_name: str) -> np.ndarray:
         return np.array(object_name.split("_")[1:], dtype=float)
     known = ", ".join(sorted(DEXTOOLBENCH_OBJECT_SCALES))
     raise ValueError(f"Unknown object '{object_name}'. Known DexToolBench objects: {known}")
+
+
+def _wait_for_enter_to_start(sim: MujocoSim) -> bool:
+    print("Adjust the MuJoCo viewer, then press Enter to start the rollout (Ctrl-D to quit).", flush=True)
+    if not sys.stdin.isatty():
+        return sys.stdin.readline() != ""
+
+    while sim._continue_running():
+        readable, _, _ = select.select([sys.stdin], [], [], 0.05)
+        if readable:
+            return sys.stdin.readline() != ""
+        if sim.viewer is not None:
+            sim.viewer.sync()
+    return False
+
+
+def _mp4_path(path: Path) -> Path:
+    if path.suffix.lower() == ".mp4":
+        return path
+    return path.with_suffix(".mp4")
+
+
+def _make_video_camera(sim: MujocoSim, camera: str):
+    if camera == "side_table":
+        object_pos = sim.get_sim_state()["object_pos"]
+        mj_camera = sim.mujoco.MjvCamera()
+        mj_camera.lookat[:] = np.array([object_pos[0], object_pos[1], 0.55])
+        mj_camera.distance = 1.0
+        mj_camera.azimuth = 90.0
+        mj_camera.elevation = -35.0
+        return mj_camera
+
+    try:
+        return int(camera)
+    except ValueError:
+        return camera
+
+
+class MujocoMp4Recorder:
+    def __init__(
+        self,
+        sim: MujocoSim,
+        path: Path,
+        fps: float,
+        width: int,
+        height: int,
+        camera: int | str,
+    ):
+        if fps <= 0.0:
+            raise ValueError(f"video_fps must be positive, got {fps}.")
+        if width <= 0 or height <= 0:
+            raise ValueError(f"video_width and video_height must be positive, got {width}x{height}.")
+
+        try:
+            import imageio.v2 as imageio
+        except ModuleNotFoundError as exc:
+            raise ModuleNotFoundError(
+                "Video recording requires imageio and imageio-ffmpeg in the active environment."
+            ) from exc
+
+        self.sim = sim
+        self.path = _mp4_path(path)
+        self.fps = fps
+        self.camera = camera
+        self.frame_period = 1.0 / fps
+        self.next_frame_time = 0.0
+        self.frame_count = 0
+        self.renderer = None
+        self.writer = None
+        sim.mj_model.vis.global_.offwidth = max(sim.mj_model.vis.global_.offwidth, width)
+        sim.mj_model.vis.global_.offheight = max(sim.mj_model.vis.global_.offheight, height)
+        self.renderer = sim.mujoco.Renderer(sim.mj_model, height=height, width=width)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.writer = imageio.get_writer(
+            self.path,
+            fps=fps,
+            codec="libx264",
+            macro_block_size=1,
+            quality=8,
+        )
+
+    def capture_until(self, sim_time: float) -> None:
+        while self.next_frame_time <= sim_time + 1.0e-9:
+            self.renderer.update_scene(self.sim.mj_data, camera=self.camera)
+            self.writer.append_data(self.renderer.render())
+            self.frame_count += 1
+            self.next_frame_time += self.frame_period
+
+    def close(self) -> None:
+        if self.writer is not None:
+            self.writer.close()
+        if self.renderer is not None:
+            self.renderer.close()
+        print(f"Wrote {self.frame_count} video frames to {self.path}", flush=True)
 
 
 def main() -> None:
@@ -309,21 +412,42 @@ def main() -> None:
         obs_list=obs_list,
     )
 
-    step = 0
-    while sim._continue_running() and (args.max_steps is None or step < args.max_steps):
-        start = time.time()
-        obs = env.compute_observation()
-        action = policy.get_normalized_action(obs, deterministic_actions=True)
-        env.step(action)
-        elapsed = time.time() - start
-        sleep_dt = env.control_dt - elapsed
-        if sleep_dt > 0:
-            time.sleep(sleep_dt)
-        else:
-            print(
-                f"Control loop too slow: target={args.control_hz:.1f}Hz actual={1.0 / elapsed:.1f}Hz"
-            )
-        step += 1
+    if args.press_enter_to_execute and not _wait_for_enter_to_start(sim):
+        return
+
+    recorder = None
+    if args.record_video:
+        recorder = MujocoMp4Recorder(
+            sim=sim,
+            path=args.video_path,
+            fps=args.video_fps,
+            width=args.video_width,
+            height=args.video_height,
+            camera=_make_video_camera(sim, args.video_camera),
+        )
+        recorder.capture_until(sim.mj_data.time)
+
+    try:
+        step = 0
+        while sim._continue_running() and (args.max_steps is None or step < args.max_steps):
+            start = time.time()
+            obs = env.compute_observation()
+            action = policy.get_normalized_action(obs, deterministic_actions=True)
+            env.step(action)
+            if recorder is not None:
+                recorder.capture_until(sim.mj_data.time)
+            elapsed = time.time() - start
+            sleep_dt = env.control_dt - elapsed
+            if sleep_dt > 0:
+                time.sleep(sleep_dt)
+            else:
+                print(
+                    f"Control loop too slow: target={args.control_hz:.1f}Hz actual={1.0 / elapsed:.1f}Hz"
+                )
+            step += 1
+    finally:
+        if recorder is not None:
+            recorder.close()
 
 
 if __name__ == "__main__":

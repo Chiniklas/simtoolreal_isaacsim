@@ -153,7 +153,6 @@ def make_multi_dextoolbench_object_cfg(object_names: list[str], mass: float) -> 
             random_choice=False,
             rigid_props=_object_rigid_props(),
             mass_props=sim_utils.MassPropertiesCfg(mass=mass),
-            collision_props=sim_utils.CollisionPropertiesCfg(),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.63), rot=(1.0, 0.0, 0.0, 0.0)),
     )
@@ -177,7 +176,6 @@ def make_multi_dextoolbench_goal_object_cfg(object_names: list[str], mass: float
             random_choice=False,
             rigid_props=_goal_rigid_props(),
             mass_props=sim_utils.MassPropertiesCfg(mass=mass),
-            collision_props=_goal_collision_props(),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 1.0, 0.0)),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(pos=(-0.35, -0.06, 0.71), rot=(1.0, 0.0, 0.0, 0.0)),
@@ -312,12 +310,15 @@ class SimToolRealSharpaEnvCfg(DirectRLEnvCfg):
 
     # reference task geometry
     table_top_z = 0.53
+    table_reset_z_range = 0.01
     table_object_z_offset = 0.25
     object_base_size = 0.04
     object_scales = (1.0, 1.0, 1.0)
+    object_scale_noise_multiplier_range = (0.9, 1.1)
     keypoint_scale = 1.5
     target_volume_mins = (-0.35, -0.2, 0.6)
     target_volume_maxs = (0.35, 0.2, 0.95)
+    target_volume_region_scale = 1.0
     goal_sampling_type = "delta"
     delta_goal_distance = 0.1
     delta_rotation_degrees = 90.0
@@ -343,11 +344,19 @@ class SimToolRealSharpaEnvCfg(DirectRLEnvCfg):
     success_tolerance = 0.075
     success_steps = 10
     max_consecutive_successes = 50
-    force_consecutive_near_goal_steps = False
+    force_consecutive_near_goal_steps = True
 
-    # disturbance placeholders, kept config-compatible with the reference task.
-    force_scale = 0.0
-    torque_scale = 0.0
+    # object force/torque disturbances
+    force_scale = 20.0
+    force_prob_range = (0.001, 0.1)
+    force_decay = 0.0
+    force_decay_interval = 0.08
+    force_only_when_lifted = True
+    torque_scale = 2.0
+    torque_prob_range = (0.001, 0.1)
+    torque_decay = 0.0
+    torque_decay_interval = 0.08
+    torque_only_when_lifted = True
 
     def __post_init__(self):
         super().__post_init__()

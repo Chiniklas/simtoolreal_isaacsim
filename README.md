@@ -96,7 +96,19 @@ torch.Size([1, 140]) torch.Size([1])
 
 ## Train
 
-Run training from the repository root:
+Run training from the repository root. Keep SAPO training replay-compatible with
+the pretrained baseline by preserving six exploration blocks:
+
+```text
+num_envs / agent.params.config.expl_coef_block_size = 6
+```
+
+The replay/player path is tuned for this six-block policy shape
+(`a2c_network.sigma` is `6 x 29`, with matching learned `extra_params`), so do
+not use one-block debug settings such as `--num_envs 16` with
+`expl_coef_block_size=16` for checkpoints you plan to replay.
+
+Small headless smoke train, still six-block compatible:
 
 ```bash
 conda activate simtoolreal
@@ -104,19 +116,40 @@ cd /home/chi-zhang/projects/simtoolreal_isaacsim
 
 python simtoolreal_lab/train_rl_games.py \
   --task simtoolreal_sharpa \
-  --num_envs 64 \
+  --num_envs 60 \
   --headless \
   --max_iterations 10 \
-  agent.params.config.minibatch_size=1024 \
-  agent.params.config.horizon_length=16 \
-  agent.params.config.mini_epochs=4 \
-  agent.params.config.central_value_config.minibatch_size=1024 \
-  agent.params.config.expl_type=none \
-  agent.params.network.space.continuous.fixed_sigma=fixed \
+  agent.params.config.expl_type=mixed_expl_learn_param \
+  agent.params.config.use_others_experience=lf \
+  agent.params.config.off_policy_ratio=1.0 \
+  agent.params.config.expl_reward_type=entropy \
+  agent.params.config.expl_coef_block_size=10 \
+  env.object_scale_noise_multiplier_range='[0.9,1.1]' \
+  env.force_consecutive_near_goal_steps=True \
+  env.force_scale=20.0 \
+  env.torque_scale=2.0 \
   agent.wandb_activate=False
 ```
 
-Enable the customized SAPO / mixed-exploration path with:
+Visual debug train, also six-block compatible:
+
+```bash
+python simtoolreal_lab/train_rl_games.py \
+  --task simtoolreal_sharpa \
+  --num_envs 18 \
+  agent.params.config.expl_type=mixed_expl_learn_param \
+  agent.params.config.use_others_experience=lf \
+  agent.params.config.off_policy_ratio=1.0 \
+  agent.params.config.expl_reward_type=entropy \
+  agent.params.config.expl_coef_block_size=3 \
+  env.object_scale_noise_multiplier_range='[0.9,1.1]' \
+  env.force_consecutive_near_goal_steps=True \
+  env.force_scale=20.0 \
+  env.torque_scale=2.0 \
+  agent.wandb_activate=False
+```
+
+Scaled SAPO / mixed-exploration training:
 
 ```bash
 python simtoolreal_lab/train_rl_games.py \
@@ -128,14 +161,17 @@ python simtoolreal_lab/train_rl_games.py \
   agent.params.config.off_policy_ratio=1.0 \
   agent.params.config.expl_reward_type=entropy \
   agent.params.config.expl_coef_block_size=256 \
+  env.object_scale_noise_multiplier_range='[0.9,1.1]' \
+  env.force_consecutive_near_goal_steps=True \
+  env.force_scale=20.0 \
+  env.torque_scale=2.0 \
   agent.wandb_activate=False
 ```
 
-This keeps `num_envs / expl_coef_block_size = 6`, matching the pretrained
-policy architecture (`a2c_network.sigma` shape `6 x 29` plus learned
-`extra_params`). The reference training launcher defaults to `24576` envs, but
-this smaller setting keeps the same six-block SAPO structure while fitting on
-single-GPU setups with roughly 1000-ish environments.
+The reference training launcher defaults to `24576` envs with
+`expl_coef_block_size=4096`; the scaled command above uses `1536 / 256` to keep
+the same six-block SAPO structure while fitting on single-GPU setups with
+roughly 1000-ish environments.
 
 Hydra output and RL-Games training logs are written inside the task directory:
 
@@ -175,8 +211,15 @@ cd /home/chi-zhang/projects/simtoolreal_isaacsim
 python -m simtoolreal_lab.deployment.mujoco.mujoco_env_no_ros \
   --config-path simtoolreal_lab/pretrained_policy/config.yaml \
   --checkpoint-path simtoolreal_lab/pretrained_policy/model.pth \
-  --object-name claw_hammer
+  --object-name claw_hammer \
+  --press-enter-to-execute \
+  --record-video \
+  --video-path outputs/mujoco_rollout.mp4 \
+  --video-camera side_table
 ```
+
+`--press-enter-to-execute` pauses once after the viewer opens so the scene can be
+adjusted before the policy rollout and video recording begin.
 
 For a headless smoke run:
 
@@ -217,7 +260,6 @@ Remaining parity work:
 - DexToolBench object loading in Isaac Lab.
 - Final reward/reset/statistics parity review.
 - Observation/action delay queues.
-- Object force and torque disturbances.
 - Evaluation and video utilities matching `reference/`.
 
 Reward parity review, simplified:
@@ -230,9 +272,11 @@ Reward parity review, simplified:
 - [x] Switch keypoint reward to improvement-based shaping after lift.
 - [x] Switch action penalties from commanded actions to joint-velocity penalties.
 - [x] Add object linear/angular velocity penalty hooks with reference default scales of `0.0`.
+- [x] Add reference-style object force/torque disturbances and object-scale noise.
 - [x] Reset goal on success without fully resetting the environment.
-- [ ] Re-check reset logic against reference (`hand_far_from_object`, dropped-object hysteresis, table-force resets).
-- [ ] Re-check goal sampling details against reference delta-goal behavior.
+- [x] Re-check reset logic against reference (`hand_far_from_object`, dropped-object hysteresis, table-force resets).
+- [x] Match reference reset sampling for table height, object orientation, dropped threshold, and DOF noise.
+- [x] Re-check goal sampling details against reference delta-goal behavior.
 - [ ] Re-check logging/statistics breakdown against reference training curves.
 
 For the original IsaacGym documentation, see `reference/README.md`.
