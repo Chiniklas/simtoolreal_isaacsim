@@ -7,26 +7,6 @@ The original IsaacGym SimToolReal codebase is kept under `reference/` for
 comparison and parity work. The active Isaac Lab package is `simtoolreal_lab`,
 and the registered Gym task is `simtoolreal_sharpa`.
 
-## Repository Layout
-
-```text
-reference/
-  Original IsaacGym SimToolReal implementation, DexToolBench tooling, baseline
-  scripts, and the customized SAPO/RL-Games fork.
-
-simtoolreal_lab/
-  Active Isaac Sim / Isaac Lab package.
-
-simtoolreal_lab/assets/kuka_sharpa/
-  KUKA-SHARPA URDF, meshes, and Isaac Lab articulation config.
-
-simtoolreal_lab/tasks/simtoolreal_sharpa/
-  Isaac Lab DirectRLEnv implementation for SimToolReal.
-
-simtoolreal_lab/rl_games/
-  Customized RL-Games fork copied from the reference project.
-```
-
 ## Setup
 
 Start from an Isaac Lab environment, then clone it for this project:
@@ -53,14 +33,6 @@ git lfs install
 git lfs pull
 ```
 
-Optional pointer-file check:
-
-```bash
-rg -l "version https://git-lfs.github.com/spec/v1" simtoolreal_lab/assets reference/assets | wc -l
-```
-
-Expected output is `0`.
-
 ## RL-Games
 
 The launcher scripts use the customized RL-Games fork at:
@@ -78,22 +50,6 @@ conda run -n simtoolreal python -c \
 
 The second printed value should be `True`.
 
-## Smoke Test
-
-Run one reset and one step:
-
-```bash
-conda run -n simtoolreal python -c \
-"from isaaclab.app import AppLauncher; app = AppLauncher(headless=True).app; import torch, gymnasium as gym; import simtoolreal_lab.tasks.simtoolreal_sharpa.gym_setup; from simtoolreal_lab.tasks.simtoolreal_sharpa.simtoolreal_sharpa_env_cfg import SimToolRealSharpaEnvCfg; cfg = SimToolRealSharpaEnvCfg(); cfg.scene.num_envs = 1; cfg.sim.device = 'cuda:0'; env = gym.make('simtoolreal_sharpa', cfg=cfg); obs, _ = env.reset(); print(obs['policy'].shape); obs, rew, terminated, truncated, info = env.step(torch.zeros((1, cfg.num_actions), device=env.unwrapped.device)); print(obs['policy'].shape, rew.shape); env.close(); app.close()"
-```
-
-Expected shapes:
-
-```text
-torch.Size([1, 140])
-torch.Size([1, 140]) torch.Size([1])
-```
-
 ## Train
 
 Run training from the repository root. Keep SAPO training replay-compatible with
@@ -107,47 +63,6 @@ The replay/player path is tuned for this six-block policy shape
 (`a2c_network.sigma` is `6 x 29`, with matching learned `extra_params`), so do
 not use one-block debug settings such as `--num_envs 16` with
 `expl_coef_block_size=16` for checkpoints you plan to replay.
-
-Small headless smoke train, still six-block compatible:
-
-```bash
-conda activate simtoolreal
-cd /home/chi-zhang/projects/simtoolreal_isaacsim
-
-python simtoolreal_lab/train_rl_games.py \
-  --task simtoolreal_sharpa \
-  --num_envs 60 \
-  --headless \
-  --max_iterations 10 \
-  agent.params.config.expl_type=mixed_expl_learn_param \
-  agent.params.config.use_others_experience=lf \
-  agent.params.config.off_policy_ratio=1.0 \
-  agent.params.config.expl_reward_type=entropy \
-  agent.params.config.expl_coef_block_size=10 \
-  env.object_scale_noise_multiplier_range='[0.9,1.1]' \
-  env.force_consecutive_near_goal_steps=True \
-  env.force_scale=20.0 \
-  env.torque_scale=2.0 \
-  agent.wandb_activate=False
-```
-
-Visual debug train, also six-block compatible:
-
-```bash
-python simtoolreal_lab/train_rl_games.py \
-  --task simtoolreal_sharpa \
-  --num_envs 18 \
-  agent.params.config.expl_type=mixed_expl_learn_param \
-  agent.params.config.use_others_experience=lf \
-  agent.params.config.off_policy_ratio=1.0 \
-  agent.params.config.expl_reward_type=entropy \
-  agent.params.config.expl_coef_block_size=3 \
-  env.object_scale_noise_multiplier_range='[0.9,1.1]' \
-  env.force_consecutive_near_goal_steps=True \
-  env.force_scale=20.0 \
-  env.torque_scale=2.0 \
-  agent.wandb_activate=False
-```
 
 Scaled SAPO / mixed-exploration training:
 
@@ -267,38 +182,4 @@ python -m simtoolreal_lab.deployment.mujoco.mujoco_env_no_ros \
   --object-name claw_hammer
 ```
 
-## Current Status
 
-Implemented:
-
-- KUKA-SHARPA Isaac Lab asset config.
-- `simtoolreal_sharpa` Gym registration.
-- DirectRLEnv reset/action/observation/reward/done skeleton.
-- 29-action and 140-observation SHARPA policy contract.
-- Customized RL-Games fork support.
-
-Remaining parity work:
-
-- DexToolBench object loading in Isaac Lab.
-- Final reward/reset/statistics parity review.
-- Observation/action delay queues.
-- Evaluation and video utilities matching `reference/`.
-
-Reward parity review, simplified:
-
-- [x] Use USD-based KUKA-SHARPA asset in training.
-- [x] Use reference-style palm and fingertip frames with offsets.
-- [x] Switch success check to keypoint-goal tolerance instead of object-center distance.
-- [x] Switch pre-lift shaping to fingertip-to-object distance deltas.
-- [x] Switch lift reward to reference-style threshold bonus plus post-threshold gating.
-- [x] Switch keypoint reward to improvement-based shaping after lift.
-- [x] Switch action penalties from commanded actions to joint-velocity penalties.
-- [x] Add object linear/angular velocity penalty hooks with reference default scales of `0.0`.
-- [x] Add reference-style object force/torque disturbances and object-scale noise.
-- [x] Reset goal on success without fully resetting the environment.
-- [x] Re-check reset logic against reference (`hand_far_from_object`, dropped-object hysteresis, table-force resets).
-- [x] Match reference reset sampling for table height, object orientation, dropped threshold, and DOF noise.
-- [x] Re-check goal sampling details against reference delta-goal behavior.
-- [ ] Re-check logging/statistics breakdown against reference training curves.
-
-For the original IsaacGym documentation, see `reference/README.md`.
