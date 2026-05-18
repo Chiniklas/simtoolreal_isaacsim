@@ -25,6 +25,18 @@ from simtoolreal_lab.deployment.mujoco.policy_player import RlPlayer
 N_OBS = 140
 N_ACT = 29
 DEFAULT_POLICY_DIR = SIMTOOLREAL_LAB_DIR / "pretrained_policy"
+DEFAULT_OBS_LIST = [
+    "joint_pos",
+    "joint_vel",
+    "prev_action_targets",
+    "palm_pos",
+    "palm_rot",
+    "object_rot",
+    "fingertip_pos_rel_palm",
+    "keypoints_rel_palm",
+    "keypoints_rel_goal",
+    "object_scales",
+]
 Q_LOWER_LIMITS = np.array(
     [
         -2.9671,
@@ -277,6 +289,10 @@ def _object_scales(object_name: str) -> np.ndarray:
     raise ValueError(f"Unknown object '{object_name}'. Known DexToolBench objects: {known}")
 
 
+def _policy_obs_list(policy: RlPlayer) -> list[str]:
+    return policy.cfg.get("task", {}).get("env", {}).get("obsList", DEFAULT_OBS_LIST)
+
+
 def _wait_for_enter_to_start(sim: MujocoSim) -> bool:
     print("Adjust the MuJoCo viewer, then press Enter to start the rollout (Ctrl-D to quit).", flush=True)
     if not sys.stdin.isatty():
@@ -400,7 +416,7 @@ def main() -> None:
         checkpoint_path=args.checkpoint_path,
         device=device,
     )
-    obs_list = policy.cfg["task"]["env"]["obsList"]
+    obs_list = _policy_obs_list(policy)
     env = MujocoEnvNoRos(
         sim=sim,
         object_scales=_object_scales(args.object_name),

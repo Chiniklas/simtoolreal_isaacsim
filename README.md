@@ -173,12 +173,34 @@ The reference training launcher defaults to `24576` envs with
 the same six-block SAPO structure while fitting on single-GPU setups with
 roughly 1000-ish environments.
 
+Checkpoint behavior comes from the RL-Games agent config. The default
+`save_frequency: 1000` writes `nn/model_<epoch>.pth` every 1000 epochs.
+Independently, `last/model.pth` is refreshed every 3 epochs, and every new best
+mean reward after `save_best_after: 100` updates `best/model.pth` directly.
+
 Hydra output and RL-Games training logs are written inside the task directory:
 
 ```text
 simtoolreal_lab/tasks/simtoolreal_sharpa/outputs/<date>/<time>/
 simtoolreal_lab/tasks/simtoolreal_sharpa/logs/<experiment_name>/
 ```
+
+## Reference Parity Gaps
+
+The Isaac Lab training path has been aligned with the reference on SAPO
+six-block policy shape, asymmetric critic state size/content, DexToolBench
+object spawning/collision, table reset/contact-force handling, success-reset
+semantics, goal-object behavior, fixed-size keypoint reward/success, and
+checkpoint-config-aware replay.
+
+Still open:
+
+- Observation/action delay is not implemented yet. Reference flags include
+  `useObsDelay` and `useActionDelay`.
+- Object-state delay/noise is not implemented yet. Reference flag:
+  `useObjectStateDelayNoise`.
+- Joint velocity observation noise is not implemented yet. Reference setting:
+  `jointVelocityObsNoiseStd`.
 
 ## Play
 

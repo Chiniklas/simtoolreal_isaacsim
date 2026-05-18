@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import argparse
 import math
+import pickle
 import pathlib
 import sys
+import yaml
 
 from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="Play an Isaac Lab RL-Games checkpoint.")
 parser.add_argument("--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O.")
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments.")
-parser.add_argument("--task", type=str, default=None, help="Gym task id.")
+parser.add_argument("--task", type=str, default="simtoolreal_sharpa", help="Gym task id.")
 parser.add_argument("--checkpoint", type=str, required=True, help="Path to checkpoint.")
 parser.add_argument("--object", type=str, default=None, help="DexToolBench object name to replay with.")
 parser.add_argument("--debug_keypoints", action="store_true", default=False, help="Visualize object and goal keypoints.")
@@ -42,6 +44,52 @@ import simtoolreal_lab.tasks.simtoolreal_sharpa.gym_setup  # noqa: F401
 from simtoolreal_lab.tasks.simtoolreal_sharpa.simtoolreal_sharpa_env_cfg import apply_object_selection
 
 
+def _checkpoint_params_dir(checkpoint_path: str | pathlib.Path) -> pathlib.Path | None:
+    checkpoint_path = pathlib.Path(checkpoint_path).resolve()
+    for parent in checkpoint_path.parents:
+        params_dir = parent / "params"
+        if (params_dir / "agent.yaml").is_file():
+            return params_dir
+    return None
+
+
+def _checkpoint_coef_id_count(checkpoint_path: str) -> int | None:
+    checkpoint = torch_ext.load_checkpoint(checkpoint_path)
+    if 0 in checkpoint:
+        checkpoint = checkpoint[0]
+    model_state = checkpoint.get("model", {})
+    for name in ("a2c_network.extra_params", "a2c_network.sigma"):
+        weight = model_state.get(name)
+        if weight is not None and weight.ndim >= 2:
+            return int(weight.shape[0])
+    return None
+
+
+def _load_replay_env_cfg(task_name: str, checkpoint_path: str):
+    params_dir = _checkpoint_params_dir(checkpoint_path)
+    env_pickle_path = params_dir / "env.pkl" if params_dir is not None else None
+    if env_pickle_path is not None and env_pickle_path.is_file():
+        print(f"[INFO]: Loading environment config from: {env_pickle_path}")
+        with open(env_pickle_path, "rb") as f:
+            return pickle.load(f)
+    return parse_env_cfg(
+        task_name,
+        device=args_cli.device,
+        num_envs=args_cli.num_envs,
+        use_fabric=not args_cli.disable_fabric,
+    )
+
+
+def _load_replay_agent_cfg(task_name: str, checkpoint_path: str) -> dict:
+    params_dir = _checkpoint_params_dir(checkpoint_path)
+    agent_yaml_path = params_dir / "agent.yaml" if params_dir is not None else None
+    if agent_yaml_path is not None and agent_yaml_path.is_file():
+        print(f"[INFO]: Loading agent config from: {agent_yaml_path}")
+        with open(agent_yaml_path, "r") as f:
+            return yaml.safe_load(f)
+    return load_cfg_from_registry(task_name, "rl_games_cfg_entry_point")
+
+
 def _player_obs(obs: torch.Tensor | dict[str, torch.Tensor], player: BasePlayer) -> torch.Tensor:
     """Convert Isaac Lab RL-Games observations to the tensor expected by RL-Games players."""
     if isinstance(obs, dict):
@@ -69,7 +117,7 @@ def _checkpoint_success_tolerance(checkpoint_path: str) -> float | None:
     checkpoint = torch_ext.load_checkpoint(checkpoint_path)
     if 0 in checkpoint:
         checkpoint = checkpoint[0]
-    env_state = checkpoint.get("env_state", {})
+    env_state = checkpoint.get("env_state") or {}
     success_tolerance = env_state.get("success_tolerance")
     if success_tolerance is None:
         return None
@@ -77,8 +125,12 @@ def _checkpoint_success_tolerance(checkpoint_path: str) -> float | None:
 
 
 def main():
-    env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs, use_fabric=not args_cli.disable_fabric)
     resume_path = retrieve_file_path(args_cli.checkpoint)
+    env_cfg = _load_replay_env_cfg(args_cli.task, resume_path)
+    env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
+    env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    if args_cli.disable_fabric:
+        env_cfg.sim.use_fabric = False
     checkpoint_success_tolerance = _checkpoint_success_tolerance(resume_path)
     if checkpoint_success_tolerance is not None:
         env_cfg.success_tolerance = checkpoint_success_tolerance
@@ -86,9 +138,15 @@ def main():
         env_cfg.object_name = args_cli.object
     env_cfg.debug_keypoints = args_cli.debug_keypoints
     apply_object_selection(env_cfg)
-    agent_cfg = load_cfg_from_registry(args_cli.task, "rl_games_cfg_entry_point")
+    agent_cfg = _load_replay_agent_cfg(args_cli.task, resume_path)
     agent_cfg["params"]["load_checkpoint"] = True
     agent_cfg["params"]["load_path"] = resume_path
+    if args_cli.device is not None:
+        agent_cfg["params"]["config"]["device"] = args_cli.device
+        agent_cfg["params"]["config"]["device_name"] = args_cli.device
+    coef_id_count = _checkpoint_coef_id_count(resume_path)
+    if coef_id_count is not None:
+        agent_cfg["params"]["config"].setdefault("player", {})["coef_id_count"] = coef_id_count
 
     rl_device = agent_cfg["params"]["config"]["device"]
     clip_obs = agent_cfg["params"]["env"].get("clip_observations", math.inf)
@@ -96,6 +154,7 @@ def main():
 
     env = gym.make(args_cli.task, cfg=env_cfg)
     env = RlGamesVecEnvWrapper(env, rl_device, clip_obs, clip_actions)
+    agent_cfg["params"]["config"]["num_actors"] = env.num_envs
     vecenv.register("IsaacRlgWrapper", lambda config_name, num_actors, **kwargs: RlGamesGpuEnv(config_name, num_actors, **kwargs))
     env_configurations.register("rlgpu", {"vecenv_type": "IsaacRlgWrapper", "env_creator": lambda **kwargs: env})
 

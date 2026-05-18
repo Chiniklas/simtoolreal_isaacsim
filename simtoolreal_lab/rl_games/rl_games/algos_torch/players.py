@@ -46,11 +46,15 @@ class PpoPlayerContinuous(BasePlayer):
         } 
         
         if self.expl_type.startswith('mixed_expl'):
-            # TODO: remove the hardcoded value 6. Change it manually to number of blocks tilll then.
+            coef_id_count = self.config.get('player', {}).get('coef_id_count', 6)
             if 'disjoint' in self.expl_type or 'learn_param' in self.expl_type:
-                ids = torch.linspace(50.0, 0.0, 6).to(self.device_name).reshape(-1,1)
+                ids = torch.linspace(50.0, 0.0, coef_id_count).to(self.device_name).reshape(-1,1)
             else:
-                ids = create_sinusoidal_encoding(torch.linspace(50.0, 0.0, 6), self.config.get('expl_reward_coef_embd_size', 32), n=100).to(self.device_name)
+                ids = create_sinusoidal_encoding(
+                    torch.linspace(50.0, 0.0, coef_id_count),
+                    self.config.get('expl_reward_coef_embd_size', 32),
+                    n=100,
+                ).to(self.device_name)
             config['coef_ids'] = ids[::self.num_agents,0]
             config['coef_id_idx'] = self.obs_shape[0]
                     

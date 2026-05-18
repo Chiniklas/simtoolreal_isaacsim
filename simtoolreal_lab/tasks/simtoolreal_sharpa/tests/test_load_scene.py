@@ -18,6 +18,7 @@ import torch  # noqa: E402
 import simtoolreal_lab.tasks.simtoolreal_sharpa.gym_setup  # noqa: E402,F401
 from simtoolreal_lab.tasks.simtoolreal_sharpa.simtoolreal_sharpa_env_cfg import (  # noqa: E402
     SimToolRealSharpaEnvCfg,
+    configure_cube_object,
     configure_multi_dextoolbench_objects,
     configure_dextoolbench_object,
 )
@@ -40,7 +41,7 @@ def test_simtoolreal_sharpa_scene_loads_and_steps(simulation_app):
 
         assert unwrapped.num_envs == 1
         assert set(unwrapped.scene.articulations) == {"robot"}
-        assert set(unwrapped.scene.rigid_objects) == {"table", "object"}
+        assert set(unwrapped.scene.rigid_objects) == {"table", "object", "goal_object"}
 
         obs, _ = env.reset()
         assert obs["policy"].shape == (1, cfg.num_observations)
@@ -53,6 +54,81 @@ def test_simtoolreal_sharpa_scene_loads_and_steps(simulation_app):
         assert rewards.shape == (1,)
         assert terminated.shape == (1,)
         assert truncated.shape == (1,)
+    finally:
+        env.close()
+
+
+def test_simtoolreal_sharpa_table_reset_follows_env_origins(simulation_app):
+    cfg = SimToolRealSharpaEnvCfg()
+    cfg.scene.num_envs = 4
+    cfg.sim.device = os.environ.get("SIMTOOLREAL_TEST_DEVICE", "cuda:0")
+    configure_cube_object(cfg)
+
+    env = gym.make("simtoolreal_sharpa", cfg=cfg)
+    try:
+        unwrapped = env.unwrapped
+        env.reset()
+
+        expected_table_xy = unwrapped.scene.env_origins[:, :2] + torch.tensor(
+            cfg.table_cfg.init_state.pos[:2], device=unwrapped.device
+        )
+        assert torch.allclose(unwrapped.table.data.root_pos_w[:, :2], expected_table_xy)
+    finally:
+        env.close()
+
+
+def test_simtoolreal_sharpa_zero_max_successes_disables_success_reset(simulation_app):
+    cfg = SimToolRealSharpaEnvCfg()
+    cfg.scene.num_envs = 1
+    cfg.sim.device = os.environ.get("SIMTOOLREAL_TEST_DEVICE", "cuda:0")
+    cfg.max_consecutive_successes = 0
+    configure_cube_object(cfg)
+
+    env = gym.make("simtoolreal_sharpa", cfg=cfg)
+    try:
+        unwrapped = env.unwrapped
+        env.reset()
+        unwrapped.consecutive_successes[:] = 10
+        terminated, _ = unwrapped._get_dones()
+        assert not terminated.any()
+    finally:
+        env.close()
+
+
+def test_simtoolreal_sharpa_table_force_smoothing_matches_reference(simulation_app):
+    cfg = SimToolRealSharpaEnvCfg()
+    cfg.scene.num_envs = 1
+    cfg.sim.device = os.environ.get("SIMTOOLREAL_TEST_DEVICE", "cuda:0")
+    cfg.with_table_force_sensor = True
+    configure_cube_object(cfg)
+
+    env = gym.make("simtoolreal_sharpa", cfg=cfg)
+    try:
+        unwrapped = env.unwrapped
+        env.reset()
+        unwrapped.table_contact_force_smoothed[:] = 0.0
+        unwrapped.max_table_contact_force_norm_smoothed[:] = 0.0
+
+        net_forces_w = torch.tensor([[[1000.0, 0.0, 0.0]]], device=unwrapped.device)
+        unwrapped._update_table_contact_force_buffers(net_forces_w)
+        assert torch.allclose(
+            unwrapped.table_contact_force_smoothed,
+            torch.tensor([[100.0, 0.0, 0.0]], device=unwrapped.device),
+        )
+        assert torch.allclose(
+            unwrapped.max_table_contact_force_norm_smoothed,
+            torch.tensor([100.0], device=unwrapped.device),
+        )
+
+        unwrapped._update_table_contact_force_buffers(torch.zeros_like(net_forces_w))
+        assert torch.allclose(
+            unwrapped.table_contact_force_smoothed,
+            torch.tensor([[90.0, 0.0, 0.0]], device=unwrapped.device),
+        )
+        assert torch.allclose(
+            unwrapped.max_table_contact_force_norm_smoothed,
+            torch.tensor([100.0], device=unwrapped.device),
+        )
     finally:
         env.close()
 
@@ -139,5 +215,39 @@ def test_simtoolreal_sharpa_keypoints_follow_object_pose(simulation_app):
         scaled_offsets = base_offsets * scales
         rotated_offsets = torch.stack((-scaled_offsets[:, 1], scaled_offsets[:, 0], scaled_offsets[:, 2]), dim=-1)
         assert torch.allclose(keypoints, pos[:, None, :] + rotated_offsets[None], atol=1.0e-6)
+    finally:
+        env.close()
+
+
+def test_simtoolreal_sharpa_fixed_size_keypoint_reward_ignores_object_scale(simulation_app):
+    cfg = SimToolRealSharpaEnvCfg()
+    cfg.scene.num_envs = 1
+    cfg.sim.device = os.environ.get("SIMTOOLREAL_TEST_DEVICE", "cuda:0")
+    cfg.object_scale_noise_multiplier_range = (1.0, 1.0)
+    cfg.fixed_size_keypoint_reward = True
+    configure_dextoolbench_object(cfg, "claw_hammer")
+
+    env = gym.make("simtoolreal_sharpa", cfg=cfg)
+    try:
+        unwrapped = env.unwrapped
+        device = unwrapped.device
+        pos = torch.tensor([[0.1, -0.2, 0.7]], device=device)
+        scales = torch.tensor([[2.5, 0.5625, 0.375]], device=device)
+        identity_quat_wxyz = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=device)
+
+        scaled_keypoints = unwrapped._compute_keypoints(pos, identity_quat_wxyz, scales)
+        fixed_keypoints = unwrapped._compute_keypoints(
+            pos,
+            identity_quat_wxyz,
+            torch.ones_like(scales),
+            unwrapped.fixed_size_keypoint_offsets,
+        )
+        fixed_offsets = torch.tensor(
+            [[1.0, 1.0, 1.0], [1.0, 1.0, -1.0], [-1.0, -1.0, 1.0], [-1.0, -1.0, -1.0]],
+            device=device,
+        ) * torch.tensor(cfg.fixed_size, device=device) * (0.5 * cfg.keypoint_scale)
+
+        assert not torch.allclose(scaled_keypoints, fixed_keypoints)
+        assert torch.allclose(fixed_keypoints, pos[:, None, :] + fixed_offsets[None])
     finally:
         env.close()

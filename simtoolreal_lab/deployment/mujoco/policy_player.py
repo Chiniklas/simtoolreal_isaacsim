@@ -19,6 +19,35 @@ if VENDORED_RL_GAMES.is_dir():
     sys.path.insert(0, str(VENDORED_RL_GAMES))
 
 
+def _checkpoint_coef_id_count(checkpoint_path: Optional[str | pathlib.Path]) -> int | None:
+    if checkpoint_path is None:
+        return None
+
+    from rl_games.algos_torch import torch_ext
+
+    checkpoint = torch_ext.load_checkpoint(str(checkpoint_path))
+    if 0 in checkpoint:
+        checkpoint = checkpoint[0]
+    model_state = checkpoint.get("model", {})
+    for name in ("a2c_network.extra_params", "a2c_network.sigma"):
+        weight = model_state.get(name)
+        if weight is not None and weight.ndim >= 2:
+            return int(weight.shape[0])
+    return None
+
+
+def _checkpoint_agent_config_path(checkpoint_path: Optional[str | pathlib.Path]) -> pathlib.Path | None:
+    if checkpoint_path is None:
+        return None
+
+    checkpoint_path = pathlib.Path(checkpoint_path).resolve()
+    for parent in checkpoint_path.parents:
+        agent_config_path = parent / "params" / "agent.yaml"
+        if agent_config_path.is_file():
+            return agent_config_path
+    return None
+
+
 def _register_omegaconf_resolvers() -> None:
     resolvers = {
         "eq": lambda x, y: str(x).lower() == str(y).lower(),
@@ -32,19 +61,42 @@ def _register_omegaconf_resolvers() -> None:
             OmegaConf.register_new_resolver(name, resolver)
 
 
-def read_cfg(config_path: str | pathlib.Path, device: Optional[str] = None) -> dict:
+def _set_train_device(cfg: dict, device: Optional[str]) -> None:
+    if device is None:
+        return
+    if "train" in cfg:
+        train_cfg = cfg["train"]["params"]["config"]
+        train_cfg["device"] = device
+        train_cfg["device_name"] = device
+    else:
+        config = cfg["params"]["config"]
+        config["device"] = device
+        config["device_name"] = device
+
+
+def read_cfg(
+    config_path: str | pathlib.Path,
+    device: Optional[str] = None,
+    checkpoint_path: Optional[str | pathlib.Path] = None,
+) -> dict:
     _register_omegaconf_resolvers()
     with open(config_path, "r") as f:
         raw_cfg = yaml.safe_load(f)
     cfg = OmegaConf.to_container(OmegaConf.create(raw_cfg), resolve=True)
-    if device is not None:
+
+    checkpoint_agent_config_path = _checkpoint_agent_config_path(checkpoint_path)
+    if checkpoint_agent_config_path is not None:
+        with open(checkpoint_agent_config_path, "r") as f:
+            checkpoint_agent_cfg = yaml.safe_load(f)
         if "train" in cfg:
-            train_cfg = cfg["train"]["params"]["config"]
-            train_cfg["device"] = device
-            train_cfg["device_name"] = device
+            cfg["train"] = checkpoint_agent_cfg
         else:
-            cfg["rl_device"] = device
-            cfg["sim_device"] = device
+            cfg["params"] = checkpoint_agent_cfg["params"]
+
+    _set_train_device(cfg, device)
+    if device is not None:
+        cfg["rl_device"] = device
+        cfg["sim_device"] = device
     return cfg
 
 
@@ -71,7 +123,7 @@ class RlPlayer:
         )
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(num_actions,), dtype=np.float32)
         self.set_env_state = lambda *args, **kwargs: None
-        self.cfg = read_cfg(config_path=config_path, device=device)
+        self.cfg = read_cfg(config_path=config_path, device=device, checkpoint_path=checkpoint_path)
 
         from rl_games.common import env_configurations
 
@@ -84,6 +136,9 @@ class RlPlayer:
         if checkpoint_path is not None:
             config["params"]["load_checkpoint"] = True
             config["params"]["load_path"] = str(checkpoint_path)
+        coef_id_count = _checkpoint_coef_id_count(checkpoint_path)
+        if coef_id_count is not None:
+            config["params"]["config"].setdefault("player", {})["coef_id_count"] = coef_id_count
 
         os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
         runner = Runner()
@@ -114,4 +169,3 @@ class RlPlayer:
 
     def reset(self) -> None:
         self.player.reset()
-

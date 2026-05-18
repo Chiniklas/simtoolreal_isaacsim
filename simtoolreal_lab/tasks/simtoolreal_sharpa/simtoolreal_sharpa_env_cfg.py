@@ -153,6 +153,7 @@ def make_multi_dextoolbench_object_cfg(object_names: list[str], mass: float) -> 
             random_choice=False,
             rigid_props=_object_rigid_props(),
             mass_props=sim_utils.MassPropertiesCfg(mass=mass),
+            collision_props=sim_utils.CollisionPropertiesCfg(),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.63), rot=(1.0, 0.0, 0.0, 0.0)),
     )
@@ -176,6 +177,7 @@ def make_multi_dextoolbench_goal_object_cfg(object_names: list[str], mass: float
             random_choice=False,
             rigid_props=_goal_rigid_props(),
             mass_props=sim_utils.MassPropertiesCfg(mass=mass),
+            collision_props=_goal_collision_props(),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 1.0, 0.0)),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(pos=(-0.35, -0.06, 0.71), rot=(1.0, 0.0, 0.0, 0.0)),
@@ -228,9 +230,9 @@ class SimToolRealSharpaEnvCfg(DirectRLEnvCfg):
     episode_length_s = 10.0
     num_actions = 29
     num_observations = 140
-    num_states = 140
+    num_states = 162
     observation_space = 140
-    state_space = 140
+    state_space = 162
     action_space = 29
     asymmetric_obs = True
 
@@ -315,6 +317,8 @@ class SimToolRealSharpaEnvCfg(DirectRLEnvCfg):
     object_base_size = 0.04
     object_scales = (1.0, 1.0, 1.0)
     object_scale_noise_multiplier_range = (0.9, 1.1)
+    fixed_size_keypoint_reward = True
+    fixed_size = (0.141, 0.03025, 0.0271)
     keypoint_scale = 1.5
     target_volume_mins = (-0.35, -0.2, 0.6)
     target_volume_maxs = (0.35, 0.2, 0.95)

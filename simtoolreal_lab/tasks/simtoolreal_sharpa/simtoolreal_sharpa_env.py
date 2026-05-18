@@ -7,7 +7,7 @@ from collections.abc import Sequence
 import re
 
 import torch
-from pxr import UsdPhysics
+from pxr import PhysxSchema, UsdPhysics
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject
@@ -86,10 +86,15 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         self.closest_fingertip_dist = -torch.ones((self.num_envs, num_fingertips), device=self.device)
         self.furthest_hand_dist = -torch.ones(self.num_envs, device=self.device)
         self.closest_keypoint_max_dist = -torch.ones(self.num_envs, device=self.device)
+        self.closest_keypoint_max_dist_fixed_size = -torch.ones(self.num_envs, device=self.device)
 
         self.keypoint_offsets = self._make_keypoint_offsets()
+        self.fixed_size_keypoint_offsets = self._make_keypoint_offsets(self.cfg.fixed_size)
         self.keypoint_debug_draw = self._make_keypoint_debug_draw() if self.cfg.debug_keypoints else None
         self._all_env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+        self.table_contact_force = torch.zeros((self.num_envs, 3), device=self.device)
+        self.table_contact_force_smoothed = torch.zeros_like(self.table_contact_force)
+        self.max_table_contact_force_norm_smoothed = torch.zeros(self.num_envs, device=self.device)
         self._setup_object_disturbances()
         self._compute_intermediate_values()
 
@@ -141,8 +146,33 @@ class SimToolRealSharpaEnv(DirectRLEnv):
             root_prim = root_prims[0]
             if root_prim.GetPath() == parent_prim.GetPath():
                 continue
+            # Apply RigidBodyAPI to parent and copy the two USD attributes.
+            child_rb = UsdPhysics.RigidBodyAPI(root_prim)
             if not parent_prim.HasAPI(UsdPhysics.RigidBodyAPI):
                 UsdPhysics.RigidBodyAPI.Apply(parent_prim)
+            parent_rb = UsdPhysics.RigidBodyAPI(parent_prim)
+            for getter_name in ("GetRigidBodyEnabledAttr", "GetKinematicEnabledAttr"):
+                child_attr = getattr(child_rb, getter_name)()
+                if child_attr.HasValue():
+                    getattr(parent_rb, getter_name)().Set(child_attr.Get())
+            # Ensure parent also has the PhysxRigidBodyAPI and copy its attributes.
+            child_px = PhysxSchema.PhysxRigidBodyAPI(root_prim)
+            if child_px:
+                parent_px = PhysxSchema.PhysxRigidBodyAPI(parent_prim)
+                if not parent_px:
+                    parent_px = PhysxSchema.PhysxRigidBodyAPI.Apply(parent_prim)
+                for getter_name in (
+                    "GetDisableGravityAttr",
+                    "GetMaxDepenetrationVelocityAttr",
+                    "GetEnableGyroscopicForcesAttr",
+                    "GetSolverPositionIterationCountAttr",
+                    "GetSolverVelocityIterationCountAttr",
+                    "GetSleepThresholdAttr",
+                    "GetStabilizationThresholdAttr",
+                ):
+                    child_attr = getattr(child_px, getter_name)()
+                    if child_attr.HasValue():
+                        getattr(parent_px, getter_name)().Set(child_attr.Get())
             root_prim.RemoveAPI(UsdPhysics.RigidBodyAPI)
 
     def _disable_goal_object_collisions(self) -> None:
@@ -216,7 +246,7 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         obs = torch.clamp(obs, -self.cfg.clamp_abs_observations, self.cfg.clamp_abs_observations)
         observations = {"policy": obs}
         if self.cfg.asymmetric_obs:
-            observations["critic"] = obs
+            observations["critic"] = self._compute_reference_states()
         return observations
 
     def _get_rewards(self) -> torch.Tensor:
@@ -226,8 +256,9 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         fingertip_delta_reward, hand_delta_penalty = self._distance_delta_rewards(lifted_object)
         keypoint_reward = self._keypoint_reward(lifted_object)
 
+        keypoints_max_dist = self._reward_keypoints_max_dist()
         keypoint_success_tolerance = self.cfg.success_tolerance * self.cfg.keypoint_scale
-        near_goal = self.keypoints_max_dist <= keypoint_success_tolerance
+        near_goal = keypoints_max_dist <= keypoint_success_tolerance
         if self.cfg.force_consecutive_near_goal_steps:
             self.near_goal_steps = (self.near_goal_steps + near_goal.long()) * near_goal.long()
         else:
@@ -267,6 +298,7 @@ class SimToolRealSharpaEnv(DirectRLEnv):
             self._reset_goals(success_env_ids, is_first_goal=False)
             self.near_goal_steps[success_env_ids] = 0
             self.closest_keypoint_max_dist[success_env_ids] = -1.0
+            self.closest_keypoint_max_dist_fixed_size[success_env_ids] = -1.0
             if self.cfg.max_consecutive_successes > 0:
                 self.episode_length_buf[success_env_ids] = 0
 
@@ -284,7 +316,7 @@ class SimToolRealSharpaEnv(DirectRLEnv):
             "total_reward": reward.mean(),
         }
         self.extras["log"] = {
-            "keypoints_max_dist": self.keypoints_max_dist.mean(),
+            "keypoints_max_dist": self._reward_keypoints_max_dist().mean(),
             "object_lift": (0.05 + self.object_pos[:, 2] - self.object_init_pos[:, 2]).mean(),
             "success_rate": reached_goal.float().mean(),
             **reward_terms,
@@ -301,11 +333,14 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         else:
             dropped = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         if self.table_contact_sensor is not None:
-            table_force_too_high = self.table_contact_force_norm > self.cfg.table_force_threshold
+            table_force_too_high = self.max_table_contact_force_norm_smoothed > self.cfg.table_force_threshold
         else:
             table_force_too_high = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         time_out = self.episode_length_buf >= self.max_episode_length - 1
-        too_many_successes = self.consecutive_successes >= self.cfg.max_consecutive_successes
+        if self.cfg.max_consecutive_successes > 0:
+            too_many_successes = self.consecutive_successes >= self.cfg.max_consecutive_successes
+        else:
+            too_many_successes = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         terminated = object_fell | too_many_successes | hand_far_from_object | dropped | table_force_too_high
         return terminated, time_out
 
@@ -321,6 +356,8 @@ class SimToolRealSharpaEnv(DirectRLEnv):
             self.cfg.table_cfg.init_state.pos[2]
             + sample_uniform(-self.cfg.table_reset_z_range, self.cfg.table_reset_z_range, (num_ids,), self.device)
         )
+        table_init_pos = torch.tensor(self.cfg.table_cfg.init_state.pos, device=self.device, dtype=table_state.dtype)
+        table_state[:, 0:3] = table_init_pos + self.scene.env_origins[env_ids]
         table_state[:, 2] = table_reset_z + self.scene.env_origins[env_ids, 2]
         table_state[:, 7:13] = 0.0
         self.table.write_root_state_to_sim(table_state, env_ids)
@@ -384,8 +421,12 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         self.closest_fingertip_dist[env_ids] = -1.0
         self.furthest_hand_dist[env_ids] = -1.0
         self.closest_keypoint_max_dist[env_ids] = -1.0
+        self.closest_keypoint_max_dist_fixed_size[env_ids] = -1.0
         self.successes[env_ids] = 0.0
         self.consecutive_successes[env_ids] = 0.0
+        self.table_contact_force[env_ids] = 0.0
+        self.table_contact_force_smoothed[env_ids] = 0.0
+        self.max_table_contact_force_norm_smoothed[env_ids] = 0.0
 
         self.object_init_pos[env_ids] = object_state[:, 0:3] - self.scene.env_origins[env_ids]
         self.object_drop_height[env_ids] = object_drop_height
@@ -515,6 +556,15 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         self.object_goal_pos = self.goal_object.data.root_pos_w - self.scene.env_origins
         self.object_goal_rot = self.goal_object.data.root_quat_w
         self.goal_keypoints = self._compute_keypoints(self.object_goal_pos, self.object_goal_rot, self.object_scales)
+        self.object_keypoints_fixed_size = self._compute_keypoints(
+            self.object_pos, self.object_rot, torch.ones_like(self.object_scales), self.fixed_size_keypoint_offsets
+        )
+        self.goal_keypoints_fixed_size = self._compute_keypoints(
+            self.object_goal_pos,
+            self.object_goal_rot,
+            torch.ones_like(self.object_scales),
+            self.fixed_size_keypoint_offsets,
+        )
         self.fingertip_pos_rel_object = self.fingertip_pos - self.object_pos[:, None, :]
         self.curr_fingertip_distances = torch.norm(self.fingertip_pos_rel_object, dim=-1)
         self.closest_fingertip_dist = torch.where(
@@ -525,14 +575,34 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         )
         self.keypoint_distances = torch.norm(self.object_keypoints - self.goal_keypoints, dim=-1)
         self.keypoints_max_dist = self.keypoint_distances.max(dim=-1).values
+        self.keypoint_distances_fixed_size = torch.norm(self.object_keypoints_fixed_size - self.goal_keypoints_fixed_size, dim=-1)
+        self.keypoints_max_dist_fixed_size = self.keypoint_distances_fixed_size.max(dim=-1).values
         self.closest_keypoint_max_dist = torch.where(
             self.closest_keypoint_max_dist < 0.0, self.keypoints_max_dist, self.closest_keypoint_max_dist
         )
+        self.closest_keypoint_max_dist_fixed_size = torch.where(
+            self.closest_keypoint_max_dist_fixed_size < 0.0,
+            self.keypoints_max_dist_fixed_size,
+            self.closest_keypoint_max_dist_fixed_size,
+        )
         self._visualize_keypoints()
         if self.table_contact_sensor is not None:
-            self.table_contact_force_norm = self.table_contact_sensor.data.net_forces_w.norm(dim=-1).max(dim=-1).values
+            self._update_table_contact_force_buffers(self.table_contact_sensor.data.net_forces_w)
         else:
-            self.table_contact_force_norm = torch.zeros(self.num_envs, device=self.device)
+            self.table_contact_force = torch.zeros((self.num_envs, 3), device=self.device)
+            self.table_contact_force_smoothed = torch.zeros_like(self.table_contact_force)
+            self.max_table_contact_force_norm_smoothed = torch.zeros(self.num_envs, device=self.device)
+
+    def _update_table_contact_force_buffers(self, net_forces_w: torch.Tensor) -> None:
+        self.table_contact_force = net_forces_w.sum(dim=1)
+        smoothing_alpha = 0.1
+        self.table_contact_force_smoothed += smoothing_alpha * (
+            self.table_contact_force - self.table_contact_force_smoothed
+        )
+        table_contact_force_norm_smoothed = self.table_contact_force_smoothed.norm(dim=-1)
+        self.max_table_contact_force_norm_smoothed = torch.maximum(
+            self.max_table_contact_force_norm_smoothed, table_contact_force_norm_smoothed
+        )
 
     def _compute_reference_observations(self) -> torch.Tensor:
         fingertip_pos_rel_palm = (self.fingertip_pos - self.palm_pos[:, None, :]).reshape(self.num_envs, -1)
@@ -556,6 +626,45 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         if obs.shape[-1] != self.cfg.num_observations:
             raise RuntimeError(f"Expected {self.cfg.num_observations} observations, got {obs.shape[-1]}.")
         return obs
+
+    def _compute_reference_states(self) -> torch.Tensor:
+        fingertip_pos_rel_palm = (self.fingertip_pos - self.palm_pos[:, None, :]).reshape(self.num_envs, -1)
+        keypoints_rel_palm = (self.object_keypoints - self.palm_pos[:, None, :]).reshape(self.num_envs, -1)
+        keypoints_rel_goal = (self.object_keypoints - self.goal_keypoints).reshape(self.num_envs, -1)
+        palm_vel = torch.cat(
+            (
+                self.robot.data.body_lin_vel_w[:, self.palm_body_idx],
+                self.robot.data.body_ang_vel_w[:, self.palm_body_idx],
+            ),
+            dim=-1,
+        )
+        reward = getattr(self, "reward_buf", torch.zeros(self.num_envs, device=self.device))
+        state = torch.cat(
+            (
+                unscale(self.robot_dof_pos, self.robot_dof_lower_limits, self.robot_dof_upper_limits),
+                self.robot_dof_vel,
+                self.prev_action_targets,
+                self.palm_pos,
+                quat_wxyz_to_xyzw(self.palm_rot),
+                palm_vel,
+                quat_wxyz_to_xyzw(self.object_rot),
+                self.object_vel,
+                fingertip_pos_rel_palm,
+                keypoints_rel_palm,
+                keypoints_rel_goal,
+                self.object_scales,
+                self._reward_closest_keypoint_max_dist().unsqueeze(-1),
+                self.closest_fingertip_dist,
+                self.lifted_object.float().unsqueeze(-1),
+                torch.log(self.episode_length_buf.float() / 10.0 + 1.0).unsqueeze(-1),
+                torch.log(self.successes + 1.0).unsqueeze(-1),
+                (0.01 * reward).unsqueeze(-1),
+            ),
+            dim=-1,
+        )
+        if state.shape[-1] != self.cfg.num_states:
+            raise RuntimeError(f"Expected {self.cfg.num_states} critic states, got {state.shape[-1]}.")
+        return state
 
     def _reset_goals(self, env_ids: torch.Tensor, is_first_goal: bool) -> None:
         num_ids = env_ids.shape[0]
@@ -638,16 +747,26 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         delta_quat = quat_from_angle_axis(angle, random_direction)
         return quat_mul(quat_wxyz, delta_quat)
 
-    def _make_keypoint_offsets(self) -> torch.Tensor:
-        half = 0.5 * self.cfg.object_base_size * self.cfg.keypoint_scale
+    def _make_keypoint_offsets(self, object_size: tuple[float, float, float] | None = None) -> torch.Tensor:
+        if object_size is None:
+            object_size = (
+                self.cfg.object_base_size,
+                self.cfg.object_base_size,
+                self.cfg.object_base_size,
+            )
         offsets = torch.tensor(
             [[1.0, 1.0, 1.0], [1.0, 1.0, -1.0], [-1.0, -1.0, 1.0], [-1.0, -1.0, -1.0]],
             device=self.device,
         )
-        return offsets * half
+        size = torch.tensor(object_size, device=self.device, dtype=offsets.dtype)
+        return offsets * (0.5 * self.cfg.keypoint_scale * size)
 
     def _compute_keypoints(
-        self, pos: torch.Tensor, quat_wxyz: torch.Tensor, object_scales: torch.Tensor
+        self,
+        pos: torch.Tensor,
+        quat_wxyz: torch.Tensor,
+        object_scales: torch.Tensor,
+        keypoint_offsets: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if pos.dim() == 3 and pos.shape[1] == 1:
             pos = pos[:, 0, :]
@@ -670,7 +789,9 @@ class SimToolRealSharpaEnv(DirectRLEnv):
                 f"scale shape={tuple(object_scales.shape)}"
             )
 
-        offsets = self.keypoint_offsets.unsqueeze(0).expand(pos.shape[0], -1, -1) * object_scales[:, None, :]
+        if keypoint_offsets is None:
+            keypoint_offsets = self.keypoint_offsets
+        offsets = keypoint_offsets.unsqueeze(0).expand(pos.shape[0], -1, -1) * object_scales[:, None, :]
         quat = quat_wxyz.unsqueeze(1).expand(-1, offsets.shape[1], -1)
         rotated_offsets = quat_apply(quat.reshape(-1, 4), offsets.reshape(-1, 3)).reshape(pos.shape[0], -1, 3)
         return pos.unsqueeze(1) + rotated_offsets
@@ -737,10 +858,24 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         return lifting_reward, lift_bonus_reward, lifted_object
 
     def _keypoint_reward(self, lifted_object: torch.Tensor) -> torch.Tensor:
-        keypoint_deltas = self.closest_keypoint_max_dist - self.keypoints_max_dist
+        keypoint_deltas = self._reward_closest_keypoint_max_dist() - self._reward_keypoints_max_dist()
         self.closest_keypoint_max_dist = torch.minimum(self.closest_keypoint_max_dist, self.keypoints_max_dist)
+        self.closest_keypoint_max_dist_fixed_size = torch.minimum(
+            self.closest_keypoint_max_dist_fixed_size,
+            self.keypoints_max_dist_fixed_size,
+        )
         keypoint_deltas = torch.clamp(keypoint_deltas, 0.0, 100.0)
         return keypoint_deltas * lifted_object * self.cfg.keypoint_rew_scale
+
+    def _reward_keypoints_max_dist(self) -> torch.Tensor:
+        if self.cfg.fixed_size_keypoint_reward:
+            return self.keypoints_max_dist_fixed_size
+        return self.keypoints_max_dist
+
+    def _reward_closest_keypoint_max_dist(self) -> torch.Tensor:
+        if self.cfg.fixed_size_keypoint_reward:
+            return self.closest_keypoint_max_dist_fixed_size
+        return self.closest_keypoint_max_dist
 
     def _action_penalties(self) -> tuple[torch.Tensor, torch.Tensor]:
         kuka_actions_penalty = (

@@ -1317,14 +1317,15 @@ class DiscreteA2CBase(A2CBase):
                     if mean_rewards[0] > self.last_mean_rewards and epoch_num >= self.save_best_after:
                         print('saving next best rewards: ', mean_rewards)
                         self.last_mean_rewards = mean_rewards[0]
-                        self.save(os.path.join(self.nn_dir, checkpoint_name))
                         torch_ext.safe_filesystem_op(os.makedirs, os.path.join(self.experiment_dir, 'best'), exist_ok=True)
-                        torch_ext.safe_symlink(os.path.relpath(os.path.join(self.nn_dir, checkpoint_name), start=os.path.join(self.experiment_dir, 'best')), os.path.join(self.experiment_dir, 'best', 'model.pth'))
+                        best_checkpoint_path = os.path.join(self.experiment_dir, 'best', 'model.pth')
+                        if os.path.islink(best_checkpoint_path):
+                            os.unlink(best_checkpoint_path)
+                        self.save(best_checkpoint_path)
 
                         if 'score_to_win' in self.config:
                             if self.last_mean_rewards > self.config['score_to_win']:
                                 print('Maximum reward achieved. Network won!')
-                                self.save(os.path.join(self.nn_dir, checkpoint_name))
                                 should_exit = True
 
                 if epoch_num >= self.max_epochs and self.max_epochs != -1:
@@ -1678,14 +1679,15 @@ class ContinuousA2CBase(A2CBase):
                     if mean_rewards[0] > self.last_mean_rewards and epoch_num >= 10:
                         print('saving next best rewards: ', mean_rewards)
                         self.last_mean_rewards = mean_rewards[0]
-                        self.save(os.path.join(self.nn_dir, checkpoint_name), all_state_dict)
                         torch_ext.safe_filesystem_op(os.makedirs, os.path.join(self.experiment_dir, 'best'), exist_ok=True)
-                        torch_ext.safe_symlink(os.path.relpath(os.path.join(self.nn_dir, checkpoint_name), start=os.path.join(self.experiment_dir, 'best')), os.path.join(self.experiment_dir, 'best', 'model.pth'))
+                        best_checkpoint_path = os.path.join(self.experiment_dir, 'best', 'model.pth')
+                        if os.path.islink(best_checkpoint_path):
+                            os.unlink(best_checkpoint_path)
+                        self.save(best_checkpoint_path, all_state_dict)
 
                         if 'score_to_win' in self.config:
                             if self.last_mean_rewards > self.config['score_to_win']:
                                 print('Maximum reward achieved. Network won!')
-                                self.save(os.path.join(self.nn_dir, checkpoint_name), all_state_dict)
                                 should_exit = True
 
                 if epoch_num >= self.max_epochs and self.max_epochs != -1:
