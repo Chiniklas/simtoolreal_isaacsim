@@ -92,10 +92,47 @@ def update_urdf(urdf_full_path, object_name):
     with open(urdf_full_path, 'w') as file:
         file.writelines(new_lines)
 
+def discover_urdfs(urdf_path):
+    """Find URDFs to convert.
+
+    Supports two layouts:
+      A. Flat: <urdf_path>/<object>/model.urdf
+      B. Nested DexToolBench: <urdf_path>/<category>/<object>/<object>.urdf
+         (the `environments/` subtree is skipped).
+    Returns list of (object_name, urdf_file_path).
+    """
+    pairs = []
+    for entry in sorted(os.listdir(urdf_path)):
+        entry_path = os.path.join(urdf_path, entry)
+        if not os.path.isdir(entry_path):
+            continue
+        if entry == "environments":
+            continue
+        # Layout A: <urdf_path>/<object>/model.urdf
+        flat_urdf = os.path.join(entry_path, "model.urdf")
+        if os.path.isfile(flat_urdf):
+            pairs.append((entry, flat_urdf))
+            continue
+        # Layout A variant: <urdf_path>/<object>/<object>.urdf
+        same_name_urdf = os.path.join(entry_path, f"{entry}.urdf")
+        if os.path.isfile(same_name_urdf):
+            pairs.append((entry, same_name_urdf))
+            continue
+        # Layout B: <urdf_path>/<category>/<object>/<object>.urdf
+        for object_name in sorted(os.listdir(entry_path)):
+            object_dir = os.path.join(entry_path, object_name)
+            if not os.path.isdir(object_dir):
+                continue
+            nested_urdf = os.path.join(object_dir, f"{object_name}.urdf")
+            if os.path.isfile(nested_urdf):
+                pairs.append((object_name, nested_urdf))
+    return pairs
+
+
 def main():
     """
     Example usage:
-    python batch_convert_urdf.py simtoolreal_lab/assets/visdex_objects/urdf simtoolreal_lab/assets/visdex_objects/USD
+    python batch_convert_urdf.py simtoolreal_lab/assets/dextoolbench simtoolreal_lab/assets/dextoolbench_usd
     """
     # check valid file path
     urdf_path = args_cli.input
@@ -108,15 +145,13 @@ def main():
     if not os.path.isabs(usd_path):
         usd_path = os.path.abspath(usd_path)
 
-    # List all subdirectories in the target directory
-    sub_dirs = os.listdir(urdf_path)
-
-    # Filter out all subdirectories deeper than one level
-    sub_dirs = [object_name for object_name in sub_dirs if os.path.isdir(os.path.join(urdf_path, object_name))]
+    pairs = discover_urdfs(urdf_path)
+    if not pairs:
+        raise ValueError(f"No URDFs discovered under {urdf_path}")
+    print(f"[INFO] Discovered {len(pairs)} URDFs to convert.")
 
     # Create Urdf converter config
-    for object_name in sub_dirs:
-        full_object_urdf_path = urdf_path + "/" + object_name + "/model.urdf"
+    for object_name, full_object_urdf_path in pairs:
         full_object_usd_path = usd_path + "/" + object_name
         usd_filename = object_name + ".usd"
 

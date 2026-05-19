@@ -51,3 +51,10 @@ dextoolbench/
 pretrained_policy/
 outputs/
 *.mp4
+
+# Re-include selected asset subtrees so they can be committed via LFS
+# (USDs/OBJs/PTHs are routed through LFS by .gitattributes).
+!simtoolreal_lab/assets/
+simtoolreal_lab/assets/*
+!simtoolreal_lab/assets/M6/
+!simtoolreal_lab/assets/M10/

@@ -33,6 +33,75 @@ git lfs install
 git lfs pull
 ```
 
+## Upstream assets (manual)
+
+Some URDFs and meshes are not tracked in this repo (see `.gitignore`) and must
+be copied in by hand from the upstream `tylerlum/simtoolreal` repo. Until this
+is automated, the procedure is:
+
+```bash
+git clone --depth 1 --branch main https://github.com/tylerlum/simtoolreal.git /tmp/simtoolreal_upstream
+
+# DexToolBench URDFs + meshes (~20 MB)
+cp -r /tmp/simtoolreal_upstream/assets/urdf/dextoolbench \
+      simtoolreal_lab/assets/dextoolbench
+
+# Standalone left SHARPA hand description (~7.6 MB)
+cp -r /tmp/simtoolreal_upstream/assets/urdf/left_sharpa_ha4 \
+      simtoolreal_lab/assets/kuka_sharpa/left_sharpa_ha4
+
+# Extra table variants
+cp /tmp/simtoolreal_upstream/assets/urdf/table_narrow_bowl_plate.urdf \
+   /tmp/simtoolreal_upstream/assets/urdf/table_narrow_cuttingboard.urdf \
+   /tmp/simtoolreal_upstream/assets/urdf/table_narrow_nail.urdf \
+   /tmp/simtoolreal_upstream/assets/urdf/table_narrow_screwdriver_hole.urdf \
+   /tmp/simtoolreal_upstream/assets/urdf/table_narrow_whiteboard.urdf \
+   simtoolreal_lab/assets/table/urdf/
+
+rm -rf /tmp/simtoolreal_upstream
+```
+
+These paths are ignored by git, so the files stay local-only.
+
+## Convert assets to USD
+
+Isaac Lab loads `.usd` files, not URDF. The training launcher expects two USD
+artifacts that must be generated locally from the URDFs above before the first
+training run:
+
+1. `simtoolreal_lab/assets/kuka_sharpa/kuka_sharpa.usd` — the robot
+2. `simtoolreal_lab/assets/dextoolbench_usd/<object>/<object>.usd` — one per
+   DexToolBench tool (12 total: `claw_hammer`, `mallet_hammer`,
+   `long_screwdriver`, `short_screwdriver`, `handle_eraser`, `flat_eraser`,
+   `flat_spatula`, `spoon_spatula`, `sharpie_marker`, `staples_marker`,
+   `red_brush`, `blue_brush`)
+
+Robot URDF → USD via IsaacLab's bundled converter:
+
+```bash
+python "$ISAACLAB_PATH/scripts/tools/convert_urdf.py" \
+  simtoolreal_lab/assets/kuka_sharpa/urdf/kuka_sharpa_description/iiwa14_left_sharpa_adjusted_restricted.urdf \
+  simtoolreal_lab/assets/kuka_sharpa/kuka_sharpa.usd \
+  --headless
+```
+
+DexToolBench URDFs → USDs via the batch converter shipped in this repo:
+
+```bash
+python simtoolreal_lab/assets/batch_convert_urdf.py \
+  simtoolreal_lab/assets/dextoolbench \
+  simtoolreal_lab/assets/dextoolbench_usd \
+  --headless
+```
+
+Each conversion boots Isaac Sim, so expect a few minutes total. The batch
+converter walks `dextoolbench/<category>/<object>/<object>.urdf`, skips the
+`environments/` subtree, and rewrites each URDF's `<robot name=...>` in place
+to `object_<name>` (idempotent on re-runs).
+
+Stage-composition warnings about `Unresolved reference prim path … fingertip/visuals`
+during the first training run are cosmetic — physics is unaffected.
+
 ## RL-Games
 
 The launcher scripts use the customized RL-Games fork at:
