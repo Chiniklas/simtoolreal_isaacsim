@@ -78,9 +78,15 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         self.object_drop_height = torch.zeros(self.num_envs, device=self.device)
         self.object_last_pos = torch.zeros(self.num_envs, 3, device=self.device)
         self.successes = torch.zeros(self.num_envs, device=self.device)
+        self.prev_episode_successes = torch.zeros_like(self.successes)
         self.consecutive_successes = torch.zeros(self.num_envs, device=self.device)
         self.near_goal_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.lifted_object = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.initial_success_tolerance = float(self.cfg.success_tolerance)
+        self.success_tolerance = float(self.cfg.success_tolerance)
+        self.target_success_tolerance = float(getattr(self.cfg, "target_success_tolerance", 0.01))
+        self.last_curriculum_update = 0
+        self.frame_since_restart = 0
         num_fingertips = len(self.fingertip_body_indices)
         self.finger_rew_coeffs = torch.ones((self.num_envs, num_fingertips), device=self.device)
         self.closest_fingertip_dist = -torch.ones((self.num_envs, num_fingertips), device=self.device)
@@ -92,6 +98,7 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         self.fixed_size_keypoint_offsets = self._make_keypoint_offsets(self.cfg.fixed_size)
         self.keypoint_debug_draw = self._make_keypoint_debug_draw() if self.cfg.debug_keypoints else None
         self._all_env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+        self._init_delay_noise_queues()
         self.table_contact_force = torch.zeros((self.num_envs, 3), device=self.device)
         self.table_contact_force_smoothed = torch.zeros_like(self.table_contact_force)
         self.max_table_contact_force_norm_smoothed = torch.zeros(self.num_envs, device=self.device)
@@ -214,7 +221,11 @@ class SimToolRealSharpaEnv(DirectRLEnv):
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         self.prev_actions.copy_(self.actions)
-        self.actions = actions.clone().clamp(-1.0, 1.0)
+        actions = actions.clone().clamp(-1.0, 1.0)
+        self.action_queue = self._update_queue(self.action_queue, actions)
+        if getattr(self.cfg, "use_action_delay", True):
+            actions = self._sample_from_queue(self.action_queue)
+        self.actions = actions.clone()
         self._compute_action_targets()
 
     def _apply_action(self) -> None:
@@ -251,13 +262,15 @@ class SimToolRealSharpaEnv(DirectRLEnv):
 
     def _get_rewards(self) -> torch.Tensor:
         self._compute_intermediate_values()
+        self.frame_since_restart += 1
+        self._update_success_tolerance_curriculum()
 
         lifting_reward, lift_bonus_reward, lifted_object = self._lifting_reward()
         fingertip_delta_reward, hand_delta_penalty = self._distance_delta_rewards(lifted_object)
         keypoint_reward = self._keypoint_reward(lifted_object)
 
         keypoints_max_dist = self._reward_keypoints_max_dist()
-        keypoint_success_tolerance = self.cfg.success_tolerance * self.cfg.keypoint_scale
+        keypoint_success_tolerance = self.success_tolerance * self.cfg.keypoint_scale
         near_goal = keypoints_max_dist <= keypoint_success_tolerance
         if self.cfg.force_consecutive_near_goal_steps:
             self.near_goal_steps = (self.near_goal_steps + near_goal.long()) * near_goal.long()
@@ -319,10 +332,36 @@ class SimToolRealSharpaEnv(DirectRLEnv):
             "keypoints_max_dist": self._reward_keypoints_max_dist().mean(),
             "object_lift": (0.05 + self.object_pos[:, 2] - self.object_init_pos[:, 2]).mean(),
             "success_rate": reached_goal.float().mean(),
+            "success_tolerance": self.success_tolerance,
             **reward_terms,
         }
         self.extras["reward_terms"] = reward_terms
         return reward
+
+    def _update_success_tolerance_curriculum(self) -> None:
+        eval_success_tolerance = getattr(self.cfg, "eval_success_tolerance", None)
+        if eval_success_tolerance is not None:
+            self.success_tolerance = float(eval_success_tolerance)
+            return
+
+        frames_since_restart = self.frame_since_restart
+        curriculum_interval = int(getattr(self.cfg, "tolerance_curriculum_interval", 3000))
+        if frames_since_restart - self.last_curriculum_update < curriculum_interval:
+            return
+
+        mean_successes_per_episode = self.prev_episode_successes.mean()
+        if mean_successes_per_episode < 3.0:
+            return
+
+        self.success_tolerance *= float(getattr(self.cfg, "tolerance_curriculum_increment", 0.9))
+        self.success_tolerance = min(self.success_tolerance, self.initial_success_tolerance)
+        self.success_tolerance = max(self.success_tolerance, self.target_success_tolerance)
+        self.last_curriculum_update = frames_since_restart
+        print(
+            f"Prev episode successes: {mean_successes_per_episode.item()}, "
+            f"success tolerance: {self.success_tolerance}",
+            flush=True,
+        )
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         self._compute_intermediate_values()
@@ -422,11 +461,15 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         self.furthest_hand_dist[env_ids] = -1.0
         self.closest_keypoint_max_dist[env_ids] = -1.0
         self.closest_keypoint_max_dist_fixed_size[env_ids] = -1.0
+        self.prev_episode_successes[env_ids] = self.successes[env_ids]
         self.successes[env_ids] = 0.0
         self.consecutive_successes[env_ids] = 0.0
         self.table_contact_force[env_ids] = 0.0
         self.table_contact_force_smoothed[env_ids] = 0.0
         self.max_table_contact_force_norm_smoothed[env_ids] = 0.0
+        self.obs_queue[env_ids] = 0.0
+        self.action_queue[env_ids] = 0.0
+        self.object_state_queue[env_ids] = 0.0
 
         self.object_init_pos[env_ids] = object_state[:, 0:3] - self.scene.env_origins[env_ids]
         self.object_drop_height[env_ids] = object_drop_height
@@ -434,6 +477,62 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         self._compute_intermediate_values()
         self.object_init_pos[env_ids] = self.object_pos[env_ids]
         self.object_last_pos[env_ids] = self.object_pos[env_ids]
+
+    def set_train_info(self, env_frames: int, *args, **kwargs) -> None:
+        pass
+
+    def get_env_state(self) -> dict:
+        return {
+            "success_tolerance": self.success_tolerance,
+            "last_curriculum_update": self.last_curriculum_update,
+            "frame_since_restart": self.frame_since_restart,
+        }
+
+    def set_env_state(self, env_state: dict | None) -> None:
+        if not env_state:
+            return
+        success_tolerance = env_state.get("success_tolerance")
+        if success_tolerance is not None:
+            self.success_tolerance = float(success_tolerance)
+        last_curriculum_update = env_state.get("last_curriculum_update")
+        if last_curriculum_update is not None:
+            self.last_curriculum_update = int(last_curriculum_update)
+        frame_since_restart = env_state.get("frame_since_restart")
+        if frame_since_restart is not None:
+            self.frame_since_restart = int(frame_since_restart)
+
+    def _init_delay_noise_queues(self) -> None:
+        obs_queue_length = max(1, int(getattr(self.cfg, "obs_delay_max", 3)))
+        action_queue_length = max(1, int(getattr(self.cfg, "action_delay_max", 3)))
+        object_state_queue_length = max(1, int(getattr(self.cfg, "object_state_delay_max", 10)))
+        self.obs_queue = torch.zeros(
+            (self.num_envs, obs_queue_length, self.cfg.num_observations),
+            device=self.device,
+        )
+        self.action_queue = torch.zeros(
+            (self.num_envs, action_queue_length, self.num_actions),
+            device=self.device,
+        )
+        self.object_state_queue = torch.zeros(
+            (self.num_envs, object_state_queue_length, 13),
+            device=self.device,
+        )
+
+    def _update_queue(self, queue: torch.Tensor, current_values: torch.Tensor) -> torch.Tensor:
+        queue_length = queue.shape[1]
+        episode_start = self.episode_length_buf <= 1
+        queue[:] = torch.where(
+            episode_start[:, None, None],
+            current_values[:, None, :].expand(-1, queue_length, -1),
+            queue,
+        )
+        queue[:, 1:] = queue[:, :-1].clone()
+        queue[:, 0] = current_values.clone()
+        return queue
+
+    def _sample_from_queue(self, queue: torch.Tensor) -> torch.Tensor:
+        delay_indices = torch.randint(0, queue.shape[1], (self.num_envs,), device=self.device)
+        return queue[self._all_env_ids, delay_indices].clone()
 
     def _compute_action_targets(self) -> None:
         if self.cfg.use_relative_control:
@@ -606,16 +705,22 @@ class SimToolRealSharpaEnv(DirectRLEnv):
 
     def _compute_reference_observations(self) -> torch.Tensor:
         fingertip_pos_rel_palm = (self.fingertip_pos - self.palm_pos[:, None, :]).reshape(self.num_envs, -1)
-        keypoints_rel_palm = (self.object_keypoints - self.palm_pos[:, None, :]).reshape(self.num_envs, -1)
-        keypoints_rel_goal = (self.object_keypoints - self.goal_keypoints).reshape(self.num_envs, -1)
+        observed_object_pos, observed_object_rot, _observed_object_vel = self._observed_object_state_for_policy()
+        observed_object_keypoints = self._compute_keypoints(observed_object_pos, observed_object_rot, self.object_scales)
+        keypoints_rel_palm = (observed_object_keypoints - self.palm_pos[:, None, :]).reshape(self.num_envs, -1)
+        keypoints_rel_goal = (observed_object_keypoints - self.goal_keypoints).reshape(self.num_envs, -1)
+        joint_vel = self.robot_dof_vel
+        joint_velocity_obs_noise_std = float(getattr(self.cfg, "joint_velocity_obs_noise_std", 0.1))
+        if joint_velocity_obs_noise_std > 0.0:
+            joint_vel = joint_vel + torch.randn_like(joint_vel) * joint_velocity_obs_noise_std
         obs = torch.cat(
             (
                 unscale(self.robot_dof_pos, self.robot_dof_lower_limits, self.robot_dof_upper_limits),
-                self.robot_dof_vel,
+                joint_vel,
                 self.prev_action_targets,
                 self.palm_pos,
                 quat_wxyz_to_xyzw(self.palm_rot),
-                quat_wxyz_to_xyzw(self.object_rot),
+                quat_wxyz_to_xyzw(observed_object_rot),
                 fingertip_pos_rel_palm,
                 keypoints_rel_palm,
                 keypoints_rel_goal,
@@ -625,7 +730,32 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         )
         if obs.shape[-1] != self.cfg.num_observations:
             raise RuntimeError(f"Expected {self.cfg.num_observations} observations, got {obs.shape[-1]}.")
+        self.obs_queue = self._update_queue(self.obs_queue, obs)
+        if getattr(self.cfg, "use_obs_delay", True):
+            obs = self._sample_from_queue(self.obs_queue)
         return obs
+
+    def _observed_object_state_for_policy(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        object_state = torch.cat((self.object_pos, self.object_rot, self.object_vel), dim=-1)
+        self.object_state_queue = self._update_queue(self.object_state_queue, object_state)
+
+        observed_object_state = object_state.clone()
+        if getattr(self.cfg, "use_object_state_delay_noise", True):
+            observed_object_state = self._sample_from_queue(self.object_state_queue)
+            xyz_noise_std = float(getattr(self.cfg, "object_state_xyz_noise_std", 0.01))
+            if xyz_noise_std > 0.0:
+                observed_object_state[:, 0:3] += torch.randn_like(observed_object_state[:, 0:3]) * xyz_noise_std
+            rotation_noise_degrees = float(getattr(self.cfg, "object_state_rotation_noise_degrees", 5.0))
+            if rotation_noise_degrees > 0.0:
+                observed_object_state[:, 3:7] = self._sample_delta_quat(
+                    observed_object_state[:, 3:7], rotation_noise_degrees
+                )
+
+        return (
+            observed_object_state[:, 0:3],
+            observed_object_state[:, 3:7],
+            observed_object_state[:, 7:13],
+        )
 
     def _compute_reference_states(self) -> torch.Tensor:
         fingertip_pos_rel_palm = (self.fingertip_pos - self.palm_pos[:, None, :]).reshape(self.num_envs, -1)

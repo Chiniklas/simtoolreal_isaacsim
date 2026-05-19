@@ -71,22 +71,22 @@ python simtoolreal_lab/train_rl_games.py \
   --task simtoolreal_sharpa \
   --num_envs 1536 \
   --headless \
-  agent.params.config.expl_type=mixed_expl_learn_param \
-  agent.params.config.use_others_experience=lf \
-  agent.params.config.off_policy_ratio=1.0 \
-  agent.params.config.expl_reward_type=entropy \
   agent.params.config.expl_coef_block_size=256 \
-  env.object_scale_noise_multiplier_range='[0.9,1.1]' \
-  env.force_consecutive_near_goal_steps=True \
-  env.force_scale=20.0 \
-  env.torque_scale=2.0 \
   agent.wandb_activate=False
 ```
 
 The reference training launcher defaults to `24576` envs with
 `expl_coef_block_size=4096`; the scaled command above uses `1536 / 256` to keep
-the same six-block SAPO structure while fitting on single-GPU setups with
-roughly 1000-ish environments.
+the same six-block SAPO structure while fitting on a smaller single-GPU budget.
+
+The reference SAPO settings live in
+`simtoolreal_lab/tasks/simtoolreal_sharpa/agents/rl_games_sapo_cfg.yaml`. The
+reference domain-randomization settings live in
+`simtoolreal_lab/tasks/simtoolreal_sharpa/simtoolreal_sharpa_env_cfg.py`, so
+they do not need to be repeated as terminal overrides. For normal
+reference-style training, keep the command short and override domain
+randomization only for ablations, debugging, or intentionally fixed-object
+runs.
 
 Checkpoint behavior comes from the RL-Games agent config. The default
 `save_frequency: 1000` writes `nn/model_<epoch>.pth` every 1000 epochs.
@@ -100,22 +100,49 @@ simtoolreal_lab/tasks/simtoolreal_sharpa/outputs/<date>/<time>/
 simtoolreal_lab/tasks/simtoolreal_sharpa/logs/<experiment_name>/
 ```
 
-## Reference Parity Gaps
+## Domain Randomization
 
 The Isaac Lab training path has been aligned with the reference on SAPO
 six-block policy shape, asymmetric critic state size/content, DexToolBench
 object spawning/collision, table reset/contact-force handling, success-reset
-semantics, goal-object behavior, fixed-size keypoint reward/success, and
-checkpoint-config-aware replay.
+semantics, goal-object behavior, fixed-size keypoint reward/success, success
+tolerance curriculum, checkpoint-config-aware replay, and the active
+sim2real/domain-randomization options used by the reference recipe.
 
-Still open:
+Active reset and task randomization:
 
-- Observation/action delay is not implemented yet. Reference flags include
-  `useObsDelay` and `useActionDelay`.
-- Object-state delay/noise is not implemented yet. Reference flag:
-  `useObjectStateDelayNoise`.
-- Joint velocity observation noise is not implemented yet. Reference setting:
-  `jointVelocityObsNoiseStd`.
+- `env.reset_position_noise_x=0.1`, `env.reset_position_noise_y=0.1`,
+  `env.reset_position_noise_z=0.02`
+- `env.randomize_object_rotation=True`
+- `env.reset_dof_pos_noise_fingers=0.1`, `env.reset_dof_pos_noise_arm=0.1`,
+  `env.reset_dof_vel_noise=0.5`
+- `env.table_reset_z_range=0.01`
+- `env.object_scale_noise_multiplier_range='[0.9,1.1]'` for reference-style
+  multi-object training, or `'[1.0,1.0]'` for fixed-size single-object runs
+- random delta goal sampling with `env.delta_goal_distance=0.1` and
+  `env.delta_rotation_degrees=90.0`
+
+Active external object disturbance randomization:
+
+- `env.force_scale=20.0`, `env.force_prob_range='[0.001,0.1]'`,
+  `env.force_only_when_lifted=True`
+- `env.torque_scale=2.0`, `env.torque_prob_range='[0.001,0.1]'`,
+  `env.torque_only_when_lifted=True`
+
+Active sim2real delay/noise randomization:
+
+- `env.use_obs_delay=True`, `env.obs_delay_max=3`
+- `env.use_action_delay=True`, `env.action_delay_max=3`
+- `env.use_object_state_delay_noise=True`, `env.object_state_delay_max=10`,
+  `env.object_state_xyz_noise_std=0.01`,
+  `env.object_state_rotation_noise_degrees=5.0`
+- `env.joint_velocity_obs_noise_std=0.1`
+
+The reference YAML also contains IsaacGym's generic `task.randomization_params`
+block for gravity, action/observation noise, robot/object mass, stiffness,
+damping, friction, armature, and restitution. That block is inactive in the
+reference training recipe because `task.randomize=False`, so it is not part of
+the matched active pipeline here.
 
 ## Play
 
@@ -181,5 +208,3 @@ Run with the MuJoCo viewer:
 python -m simtoolreal_lab.deployment.mujoco.mujoco_env_no_ros \
   --object-name claw_hammer
 ```
-
-
