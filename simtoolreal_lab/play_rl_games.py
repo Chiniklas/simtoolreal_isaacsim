@@ -44,6 +44,28 @@ import simtoolreal_lab.tasks.simtoolreal_sharpa.gym_setup  # noqa: F401
 from simtoolreal_lab.tasks.simtoolreal_sharpa.simtoolreal_sharpa_env_cfg import apply_object_selection
 
 
+class SimToolRealRlGamesVecEnvWrapper(RlGamesVecEnvWrapper):
+    def get_env_state(self):
+        if hasattr(self.unwrapped, "get_env_state"):
+            return self.unwrapped.get_env_state()
+        return None
+
+    def set_env_state(self, env_state):
+        if hasattr(self.unwrapped, "set_env_state"):
+            self.unwrapped.set_env_state(env_state)
+
+
+class SimToolRealRlGamesGpuEnv(RlGamesGpuEnv):
+    def get_env_state(self):
+        if hasattr(self.env, "get_env_state"):
+            return self.env.get_env_state()
+        return None
+
+    def set_env_state(self, env_state):
+        if hasattr(self.env, "set_env_state"):
+            self.env.set_env_state(env_state)
+
+
 def _checkpoint_params_dir(checkpoint_path: str | pathlib.Path) -> pathlib.Path | None:
     checkpoint_path = pathlib.Path(checkpoint_path).resolve()
     for parent in checkpoint_path.parents:
@@ -153,9 +175,9 @@ def main():
     clip_actions = agent_cfg["params"]["env"].get("clip_actions", math.inf)
 
     env = gym.make(args_cli.task, cfg=env_cfg)
-    env = RlGamesVecEnvWrapper(env, rl_device, clip_obs, clip_actions)
+    env = SimToolRealRlGamesVecEnvWrapper(env, rl_device, clip_obs, clip_actions)
     agent_cfg["params"]["config"]["num_actors"] = env.num_envs
-    vecenv.register("IsaacRlgWrapper", lambda config_name, num_actors, **kwargs: RlGamesGpuEnv(config_name, num_actors, **kwargs))
+    vecenv.register("IsaacRlgWrapper", lambda config_name, num_actors, **kwargs: SimToolRealRlGamesGpuEnv(config_name, num_actors, **kwargs))
     env_configurations.register("rlgpu", {"vecenv_type": "IsaacRlgWrapper", "env_creator": lambda **kwargs: env})
 
     runner = Runner()

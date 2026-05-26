@@ -346,9 +346,24 @@ class SimToolRealSharpaEnvCfg(DirectRLEnvCfg):
     table_force_threshold = 100.0
     reset_when_dropped = False
     success_tolerance = 0.075
+    target_success_tolerance = 0.01
+    tolerance_curriculum_increment = 0.9
+    tolerance_curriculum_interval = 3000
+    eval_success_tolerance = None
     success_steps = 10
     max_consecutive_successes = 50
     force_consecutive_near_goal_steps = True
+
+    # sim2real/domain-randomization delays and observation noise
+    use_obs_delay = True
+    obs_delay_max = 3
+    use_action_delay = True
+    action_delay_max = 3
+    use_object_state_delay_noise = True
+    object_state_delay_max = 10
+    object_state_xyz_noise_std = 0.01
+    object_state_rotation_noise_degrees = 5.0
+    joint_velocity_obs_noise_std = 0.1
 
     # object force/torque disturbances
     force_scale = 20.0

@@ -57,6 +57,36 @@ import simtoolreal_lab.tasks.simtoolreal_sharpa.gym_setup  # noqa: F401
 from simtoolreal_lab.tasks.simtoolreal_sharpa.simtoolreal_sharpa_env_cfg import apply_object_selection
 
 
+class SimToolRealRlGamesVecEnvWrapper(RlGamesVecEnvWrapper):
+    def set_train_info(self, env_frames, *args, **kwargs):
+        if hasattr(self.unwrapped, "set_train_info"):
+            self.unwrapped.set_train_info(env_frames, *args, **kwargs)
+
+    def get_env_state(self):
+        if hasattr(self.unwrapped, "get_env_state"):
+            return self.unwrapped.get_env_state()
+        return None
+
+    def set_env_state(self, env_state):
+        if hasattr(self.unwrapped, "set_env_state"):
+            self.unwrapped.set_env_state(env_state)
+
+
+class SimToolRealRlGamesGpuEnv(RlGamesGpuEnv):
+    def set_train_info(self, env_frames, *args, **kwargs):
+        if hasattr(self.env, "set_train_info"):
+            self.env.set_train_info(env_frames, *args, **kwargs)
+
+    def get_env_state(self):
+        if hasattr(self.env, "get_env_state"):
+            return self.env.get_env_state()
+        return None
+
+    def set_env_state(self, env_state):
+        if hasattr(self.env, "set_env_state"):
+            self.env.set_env_state(env_state)
+
+
 @hydra_task_config(args_cli.task, "rl_games_cfg_entry_point")
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: dict):
     """Train with RL-Games."""
@@ -121,9 +151,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     if isinstance(env.unwrapped, DirectMARLEnv):
         env = multi_agent_to_single_agent(env)
-    env = RlGamesVecEnvWrapper(env, rl_device, clip_obs, clip_actions)
+    env = SimToolRealRlGamesVecEnvWrapper(env, rl_device, clip_obs, clip_actions)
 
-    vecenv.register("IsaacRlgWrapper", lambda config_name, num_actors, **kwargs: RlGamesGpuEnv(config_name, num_actors, **kwargs))
+    vecenv.register("IsaacRlgWrapper", lambda config_name, num_actors, **kwargs: SimToolRealRlGamesGpuEnv(config_name, num_actors, **kwargs))
     env_configurations.register("rlgpu", {"vecenv_type": "IsaacRlgWrapper", "env_creator": lambda **kwargs: env})
     agent_cfg["params"]["config"]["num_actors"] = env.unwrapped.num_envs
     batch_size = env.unwrapped.num_envs * agent_cfg["params"]["config"]["horizon_length"]
