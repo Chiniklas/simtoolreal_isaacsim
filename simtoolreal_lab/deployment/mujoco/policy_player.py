@@ -122,7 +122,7 @@ class RlPlayer:
             low=-np.inf, high=np.inf, shape=(num_observations,), dtype=np.float32
         )
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(num_actions,), dtype=np.float32)
-        self.set_env_state = lambda *args, **kwargs: None
+        self.restored_env_state = None
         self.cfg = read_cfg(config_path=config_path, device=device, checkpoint_path=checkpoint_path)
 
         from rl_games.common import env_configurations
@@ -169,3 +169,6 @@ class RlPlayer:
 
     def reset(self) -> None:
         self.player.reset()
+
+    def set_env_state(self, env_state) -> None:
+        self.restored_env_state = env_state

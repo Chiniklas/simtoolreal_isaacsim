@@ -95,8 +95,10 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         self.closest_keypoint_max_dist_fixed_size = -torch.ones(self.num_envs, device=self.device)
 
         self.keypoint_offsets = self._make_keypoint_offsets()
+        self.grasp_bounding_box_offsets = self._make_grasp_bounding_box_offsets()
         self.fixed_size_keypoint_offsets = self._make_keypoint_offsets(self.cfg.fixed_size)
-        self.keypoint_debug_draw = self._make_keypoint_debug_draw() if self.cfg.debug_keypoints else None
+        debug_draw_enabled = self.cfg.debug_keypoints or self.cfg.debug_grasp_bounding_box
+        self.keypoint_debug_draw = self._make_keypoint_debug_draw() if debug_draw_enabled else None
         self._all_env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
         self._init_delay_noise_queues()
         self.table_contact_force = torch.zeros((self.num_envs, 3), device=self.device)
@@ -479,7 +481,7 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         self.object_last_pos[env_ids] = self.object_pos[env_ids]
 
     def set_train_info(self, env_frames: int, *args, **kwargs) -> None:
-        pass
+        self.total_train_env_frames = int(env_frames)
 
     def get_env_state(self) -> dict:
         return {
@@ -684,7 +686,7 @@ class SimToolRealSharpaEnv(DirectRLEnv):
             self.keypoints_max_dist_fixed_size,
             self.closest_keypoint_max_dist_fixed_size,
         )
-        self._visualize_keypoints()
+        self._visualize_debug_shapes()
         if self.table_contact_sensor is not None:
             self._update_table_contact_force_buffers(self.table_contact_sensor.data.net_forces_w)
         else:
@@ -850,6 +852,7 @@ class SimToolRealSharpaEnv(DirectRLEnv):
     def _target_volume_bounds(self) -> tuple[torch.Tensor, torch.Tensor]:
         mins = torch.tensor(self.cfg.target_volume_mins, device=self.device)
         maxs = torch.tensor(self.cfg.target_volume_maxs, device=self.device)
+        mins, maxs = torch.minimum(mins, maxs), torch.maximum(mins, maxs)
         center = (mins + maxs) * 0.5
         half_range = (maxs - mins) * 0.5 * self.cfg.target_volume_region_scale
         return center - half_range, center + half_range
@@ -890,6 +893,22 @@ class SimToolRealSharpaEnv(DirectRLEnv):
         )
         size = torch.tensor(object_size, device=self.device, dtype=offsets.dtype)
         return offsets * (0.5 * self.cfg.keypoint_scale * size)
+
+    def _make_grasp_bounding_box_offsets(self) -> torch.Tensor:
+        offsets = torch.tensor(
+            [
+                [-1.0, -1.0, -1.0],
+                [-1.0, -1.0, 1.0],
+                [-1.0, 1.0, -1.0],
+                [-1.0, 1.0, 1.0],
+                [1.0, -1.0, -1.0],
+                [1.0, -1.0, 1.0],
+                [1.0, 1.0, -1.0],
+                [1.0, 1.0, 1.0],
+            ],
+            device=self.device,
+        )
+        return offsets * (0.5 * self.cfg.keypoint_scale * self.cfg.object_base_size)
 
     def _compute_keypoints(
         self,
@@ -940,22 +959,79 @@ class SimToolRealSharpaEnv(DirectRLEnv):
 
             return acquire_debug_draw_interface()
 
-    def _visualize_keypoints(self) -> None:
+    def _visualize_debug_shapes(self) -> None:
         if getattr(self, "keypoint_debug_draw", None) is None:
             return
 
-        object_keypoints_w = self.object_keypoints + self.scene.env_origins[:, None, :]
-        goal_keypoints_w = self.goal_keypoints + self.scene.env_origins[:, None, :]
-        object_points = [tuple(point) for point in object_keypoints_w.reshape(-1, 3).detach().cpu().tolist()]
-        goal_points = [tuple(point) for point in goal_keypoints_w.reshape(-1, 3).detach().cpu().tolist()]
-        point_size = max(1.0, self.cfg.debug_keypoint_radius * 1000.0)
-
         self.keypoint_debug_draw.clear_points()
+        if hasattr(self.keypoint_debug_draw, "clear_lines"):
+            self.keypoint_debug_draw.clear_lines()
+
+        if self.cfg.debug_keypoints:
+            object_keypoints_w = self.object_keypoints + self.scene.env_origins[:, None, :]
+            goal_keypoints_w = self.goal_keypoints + self.scene.env_origins[:, None, :]
+            object_points = [tuple(point) for point in object_keypoints_w.reshape(-1, 3).detach().cpu().tolist()]
+            goal_points = [tuple(point) for point in goal_keypoints_w.reshape(-1, 3).detach().cpu().tolist()]
+            point_size = max(1.0, self.cfg.debug_keypoint_radius * 1000.0)
+
+            self.keypoint_debug_draw.draw_points(
+                object_points + goal_points,
+                [(0.1, 0.45, 1.0, 1.0)] * len(object_points) + [(1.0, 0.15, 0.85, 1.0)] * len(goal_points),
+                [point_size] * (len(object_points) + len(goal_points)),
+            )
+
+        if self.cfg.debug_grasp_bounding_box:
+            self._visualize_grasp_bounding_box()
+
+    def _visualize_grasp_bounding_box(self) -> None:
+        object_corners = self._compute_keypoints(
+            self.object_pos, self.object_rot, self.object_scales, self.grasp_bounding_box_offsets
+        )
+        goal_corners = self._compute_keypoints(
+            self.object_goal_pos, self.object_goal_rot, self.object_scales, self.grasp_bounding_box_offsets
+        )
+        object_corners_w = object_corners + self.scene.env_origins[:, None, :]
+        goal_corners_w = goal_corners + self.scene.env_origins[:, None, :]
+        edge_indices = (
+            (0, 1),
+            (0, 2),
+            (0, 4),
+            (1, 3),
+            (1, 5),
+            (2, 3),
+            (2, 6),
+            (3, 7),
+            (4, 5),
+            (4, 6),
+            (5, 7),
+            (6, 7),
+        )
+        point_size = max(1.0, self.cfg.debug_keypoint_radius * 700.0)
+        object_points = [tuple(point) for point in object_corners_w.reshape(-1, 3).detach().cpu().tolist()]
+        goal_points = [tuple(point) for point in goal_corners_w.reshape(-1, 3).detach().cpu().tolist()]
         self.keypoint_debug_draw.draw_points(
             object_points + goal_points,
             [(0.1, 0.45, 1.0, 1.0)] * len(object_points) + [(1.0, 0.15, 0.85, 1.0)] * len(goal_points),
             [point_size] * (len(object_points) + len(goal_points)),
         )
+
+        if not hasattr(self.keypoint_debug_draw, "draw_lines"):
+            return
+        line_starts = []
+        line_ends = []
+        line_colors = []
+        for corners, color in (
+            (object_corners_w, (0.1, 0.45, 1.0, 1.0)),
+            (goal_corners_w, (1.0, 0.15, 0.85, 1.0)),
+        ):
+            corners_cpu = corners.detach().cpu()
+            for env_idx in range(corners_cpu.shape[0]):
+                for start_idx, end_idx in edge_indices:
+                    line_starts.append(tuple(corners_cpu[env_idx, start_idx].tolist()))
+                    line_ends.append(tuple(corners_cpu[env_idx, end_idx].tolist()))
+                    line_colors.append(color)
+        line_widths = [float(self.cfg.debug_grasp_bounding_box_line_width)] * len(line_starts)
+        self.keypoint_debug_draw.draw_lines(line_starts, line_ends, line_colors, line_widths)
 
     def _distance_delta_rewards(self, lifted_object: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         fingertip_deltas_closest = self.closest_fingertip_dist - self.curr_fingertip_distances

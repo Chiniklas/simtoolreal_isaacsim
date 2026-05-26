@@ -25,12 +25,12 @@ env_cfg:
   table_reset_z_range: 0.01
   table_object_z_offset: 0.25
   object_base_size: 0.04
-  object_scale_noise_multiplier_range: [1.0, 1.0]
+  object_scale_noise_multiplier_range: [0.9, 1.1]
   fixed_size_keypoint_reward: True
   fixed_size: [0.141, 0.03025, 0.0271]
   keypoint_scale: 1.5
-  target_volume_mins: [-0.35, -0.2, 0.6]
-  target_volume_maxs: [0.35, 0.2, 0.95]
+  target_volume_mins: [-0.35, -0.1, 0.68]
+  target_volume_maxs: [0.35, 0.2, 1.05]
   target_volume_region_scale: 1.0
   goal_sampling_type: delta
   delta_goal_distance: 0.1
@@ -59,7 +59,7 @@ env_cfg:
   eval_success_tolerance: null
   success_steps: 10
   max_consecutive_successes: 50
-  force_consecutive_near_goal_steps: True
+  force_consecutive_near_goal_steps: False
   use_obs_delay: True
   obs_delay_max: 3
   use_action_delay: True
@@ -69,19 +69,19 @@ env_cfg:
   object_state_xyz_noise_std: 0.01
   object_state_rotation_noise_degrees: 5.0
   joint_velocity_obs_noise_std: 0.01
-  force_scale: 20.0
+  force_scale: 2.0
   force_prob_range: [0.001, 0.1]
-  force_decay: 0.0
+  force_decay: 0.99
   force_decay_interval: 0.08
   force_only_when_lifted: True
-  torque_scale: 2.0
+  torque_scale: 0.0
   torque_prob_range: [0.001, 0.1]
-  torque_decay: 0.0
+  torque_decay: 0.99
   torque_decay_interval: 0.08
-  torque_only_when_lifted: True
+  torque_only_when_lifted: False
 
 params:
-  seed: 42
+  seed: 0
 
   env:
     clip_observations: 10.0
@@ -125,7 +125,7 @@ params:
   load_path: ''
 
   config:
-    name: SimToolRealLSTMAsymmetricPPO
+    name: SimToolRealLSTMAsymmetricPPOPretrainLike
     env_name: rlgpu
     device: 'cuda:0'
     device_name: 'cuda:0'
@@ -135,7 +135,6 @@ params:
     normalize_input: True
     normalize_value: True
     normalize_advantage: True
-    value_bootstrap: False
     reward_shaper:
       scale_value: 0.01
     num_actors: -1
@@ -149,7 +148,7 @@ params:
     max_epochs: 1000000
     max_frames: 100000000000000
     save_best_after: 100
-    save_frequency: 1000
+    save_frequency: 3000
     print_stats: True
     grad_norm: 1.0
     entropy_coef: 0.0
@@ -204,7 +203,7 @@ params:
 
 wandb_activate: False
 wandb_group: 'rl_gpu'
-wandb_name: 'simtoolreal_sharpa'
+wandb_name: 'simtoolreal_sharpa_pretrain_like'
 wandb_entity: ''
 wandb_project: 'simtoolreal'
 wandb_tags: []

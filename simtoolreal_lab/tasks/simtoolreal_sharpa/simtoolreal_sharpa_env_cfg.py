@@ -247,7 +247,7 @@ class SimToolRealSharpaEnvCfg(DirectRLEnvCfg):
             gpu_collision_stack_size=2**29,
         ),
     )
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1024, env_spacing=1.2, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1536, env_spacing=1.2, replicate_physics=True)
 
     # assets
     object_name = "multi_dextoolbench"
@@ -308,7 +308,9 @@ class SimToolRealSharpaEnvCfg(DirectRLEnvCfg):
     object_start_pose: tuple[float, float, float, float, float, float, float] | None = None
     goal_object_pose: tuple[float, float, float, float, float, float, float] | None = None
     debug_keypoints = False
+    debug_grasp_bounding_box = False
     debug_keypoint_radius = 0.012
+    debug_grasp_bounding_box_line_width = 3.0
 
     # reference task geometry
     table_top_z = 0.53
@@ -320,8 +322,8 @@ class SimToolRealSharpaEnvCfg(DirectRLEnvCfg):
     fixed_size_keypoint_reward = True
     fixed_size = (0.141, 0.03025, 0.0271)
     keypoint_scale = 1.5
-    target_volume_mins = (-0.35, -0.2, 0.6)
-    target_volume_maxs = (0.35, 0.2, 0.95)
+    target_volume_mins = (-0.35, -0.1, 0.68)
+    target_volume_maxs = (0.35, 0.2, 1.05)
     target_volume_region_scale = 1.0
     goal_sampling_type = "delta"
     delta_goal_distance = 0.1
@@ -344,7 +346,7 @@ class SimToolRealSharpaEnvCfg(DirectRLEnvCfg):
     hand_far_from_object_threshold = 1.5
     with_table_force_sensor = False
     table_force_threshold = 100.0
-    reset_when_dropped = False
+    reset_when_dropped = True
     success_tolerance = 0.075
     target_success_tolerance = 0.01
     tolerance_curriculum_increment = 0.9
@@ -352,7 +354,7 @@ class SimToolRealSharpaEnvCfg(DirectRLEnvCfg):
     eval_success_tolerance = None
     success_steps = 10
     max_consecutive_successes = 50
-    force_consecutive_near_goal_steps = True
+    force_consecutive_near_goal_steps = False
 
     # sim2real/domain-randomization delays and observation noise
     use_obs_delay = True
@@ -363,19 +365,19 @@ class SimToolRealSharpaEnvCfg(DirectRLEnvCfg):
     object_state_delay_max = 10
     object_state_xyz_noise_std = 0.01
     object_state_rotation_noise_degrees = 5.0
-    joint_velocity_obs_noise_std = 0.1
+    joint_velocity_obs_noise_std = 0.01
 
     # object force/torque disturbances
-    force_scale = 20.0
+    force_scale = 2.0
     force_prob_range = (0.001, 0.1)
-    force_decay = 0.0
+    force_decay = 0.99
     force_decay_interval = 0.08
     force_only_when_lifted = True
-    torque_scale = 2.0
+    torque_scale = 0.0
     torque_prob_range = (0.001, 0.1)
-    torque_decay = 0.0
+    torque_decay = 0.99
     torque_decay_interval = 0.08
-    torque_only_when_lifted = True
+    torque_only_when_lifted = False
 
     def __post_init__(self):
         super().__post_init__()

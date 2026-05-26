@@ -104,6 +104,39 @@ Q_UPPER_LIMITS = np.array(
     ]
 )
 KEYPOINT_OFFSETS = np.array([[1, 1, 1], [1, 1, -1], [-1, -1, 1], [-1, -1, -1]], dtype=np.float32)
+GRASP_BOUNDING_BOX_OFFSETS = np.array(
+    [
+        [-1, -1, -1],
+        [-1, -1, 1],
+        [-1, 1, -1],
+        [-1, 1, 1],
+        [1, -1, -1],
+        [1, -1, 1],
+        [1, 1, -1],
+        [1, 1, 1],
+    ],
+    dtype=np.float32,
+)
+GRASP_BOUNDING_BOX_EDGES = (
+    (0, 1),
+    (0, 2),
+    (0, 4),
+    (1, 3),
+    (1, 5),
+    (2, 3),
+    (2, 6),
+    (3, 7),
+    (4, 5),
+    (4, 6),
+    (5, 7),
+    (6, 7),
+)
+KEYPOINT_MARKER_RADIUS = 0.012
+GRASP_BOUNDING_BOX_LINE_RADIUS = 0.003
+OBJECT_KEYPOINT_MARKER_RGBA = np.array([1.0, 0.0, 0.75, 1.0], dtype=np.float32)
+GOAL_KEYPOINT_MARKER_RGBA = np.array([0.0, 1.0, 0.2, 1.0], dtype=np.float32)
+OBJECT_GRASP_BOUNDING_BOX_RGBA = np.array([0.1, 0.45, 1.0, 1.0], dtype=np.float32)
+GOAL_GRASP_BOUNDING_BOX_RGBA = np.array([1.0, 0.15, 0.85, 1.0], dtype=np.float32)
 FINGERTIP_BODY_NAMES = [
     "palmleft_index_DP",
     "palmleft_middle_DP",
@@ -152,6 +185,140 @@ def _compute_keypoints(pos: np.ndarray, quat_xyzw: np.ndarray, scales: np.ndarra
     return keypoints
 
 
+def _compute_grasp_bounding_box_corners(
+    pos: np.ndarray, quat_xyzw: np.ndarray, scales: np.ndarray
+) -> np.ndarray:
+    offsets = GRASP_BOUNDING_BOX_OFFSETS[None] * 0.04 * 1.5 * 0.5 * scales[:, None]
+    corners = np.zeros((pos.shape[0], 8, 3), dtype=np.float32)
+    for i in range(8):
+        corners[:, i] = pos + _quat_rotate_xyzw(quat_xyzw, offsets[:, i])
+    return corners
+
+
+def _compute_object_and_goal_keypoints(
+    sim: MujocoSim, object_scales: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    sim_state = sim.get_sim_state()
+    object_quat_xyzw = sim_state["object_quat_wxyz"][[1, 2, 3, 0]]
+    goal_quat_xyzw = sim_state["goal_object_quat_wxyz"][[1, 2, 3, 0]]
+    object_keypoints = _compute_keypoints(
+        sim_state["object_pos"][None], object_quat_xyzw[None], object_scales[None]
+    )[0]
+    goal_keypoints = _compute_keypoints(
+        sim_state["goal_object_pos"][None], goal_quat_xyzw[None], object_scales[None]
+    )[0]
+    return object_keypoints, goal_keypoints
+
+
+def _compute_object_and_goal_grasp_bounding_boxes(
+    sim: MujocoSim, object_scales: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    sim_state = sim.get_sim_state()
+    object_quat_xyzw = sim_state["object_quat_wxyz"][[1, 2, 3, 0]]
+    goal_quat_xyzw = sim_state["goal_object_quat_wxyz"][[1, 2, 3, 0]]
+    object_corners = _compute_grasp_bounding_box_corners(
+        sim_state["object_pos"][None], object_quat_xyzw[None], object_scales[None]
+    )[0]
+    goal_corners = _compute_grasp_bounding_box_corners(
+        sim_state["goal_object_pos"][None], goal_quat_xyzw[None], object_scales[None]
+    )[0]
+    return object_corners, goal_corners
+
+
+def _draw_keypoint_markers(sim: MujocoSim, object_scales: np.ndarray) -> None:
+    _draw_debug_markers(
+        sim,
+        object_scales,
+        visualize_keypoints=True,
+        visualize_grasp_bounding_box=False,
+    )
+
+
+def _draw_debug_markers(
+    sim: MujocoSim,
+    object_scales: np.ndarray,
+    visualize_keypoints: bool,
+    visualize_grasp_bounding_box: bool,
+) -> None:
+    if sim.viewer is None:
+        return
+
+    with sim.viewer.lock():
+        user_scn = sim.viewer.user_scn
+        max_geoms = len(user_scn.geoms)
+        user_scn.ngeom = 0
+
+        if visualize_keypoints:
+            object_keypoints, goal_keypoints = _compute_object_and_goal_keypoints(sim, object_scales)
+            marker_positions = (object_keypoints, goal_keypoints)
+            marker_colors = (OBJECT_KEYPOINT_MARKER_RGBA, GOAL_KEYPOINT_MARKER_RGBA)
+            for keypoints, rgba in zip(marker_positions, marker_colors):
+                for pos in keypoints:
+                    if user_scn.ngeom >= max_geoms:
+                        return
+                    geom = user_scn.geoms[user_scn.ngeom]
+                    sim.mujoco.mjv_initGeom(
+                        geom,
+                        sim.mujoco.mjtGeom.mjGEOM_SPHERE,
+                        np.full(3, KEYPOINT_MARKER_RADIUS, dtype=np.float64),
+                        pos.astype(np.float64),
+                        np.eye(3, dtype=np.float64).reshape(-1),
+                        rgba.astype(np.float32),
+                    )
+                    user_scn.ngeom += 1
+
+        if visualize_grasp_bounding_box:
+            object_corners, goal_corners = _compute_object_and_goal_grasp_bounding_boxes(sim, object_scales)
+            for corners, rgba in (
+                (object_corners, OBJECT_GRASP_BOUNDING_BOX_RGBA),
+                (goal_corners, GOAL_GRASP_BOUNDING_BOX_RGBA),
+            ):
+                for pos in corners:
+                    if user_scn.ngeom >= max_geoms:
+                        return
+                    geom = user_scn.geoms[user_scn.ngeom]
+                    sim.mujoco.mjv_initGeom(
+                        geom,
+                        sim.mujoco.mjtGeom.mjGEOM_SPHERE,
+                        np.full(3, KEYPOINT_MARKER_RADIUS * 0.7, dtype=np.float64),
+                        pos.astype(np.float64),
+                        np.eye(3, dtype=np.float64).reshape(-1),
+                        rgba.astype(np.float32),
+                    )
+                    user_scn.ngeom += 1
+                for start_idx, end_idx in GRASP_BOUNDING_BOX_EDGES:
+                    if user_scn.ngeom >= max_geoms:
+                        return
+                    geom = user_scn.geoms[user_scn.ngeom]
+                    start = corners[start_idx].astype(np.float64)
+                    end = corners[end_idx].astype(np.float64)
+                    sim.mujoco.mjv_initGeom(
+                        geom,
+                        sim.mujoco.mjtGeom.mjGEOM_CAPSULE,
+                        np.zeros(3, dtype=np.float64),
+                        np.zeros(3, dtype=np.float64),
+                        np.eye(3, dtype=np.float64).reshape(-1),
+                        rgba.astype(np.float32),
+                    )
+                    sim.mujoco.mjv_connector(
+                        geom,
+                        sim.mujoco.mjtGeom.mjGEOM_CAPSULE,
+                        GRASP_BOUNDING_BOX_LINE_RADIUS,
+                        start,
+                        end,
+                    )
+                    user_scn.ngeom += 1
+
+
+def _normalize_cli_flag_aliases() -> None:
+    aliases = {
+        "--visualize_grasp_bounding_box": "--visualize-grasp-bounding-box",
+        "--visualize_grasp_bouding_box": "--visualize-grasp-bounding-box",
+        "--visualize-grasp-bouding-box": "--visualize-grasp-bounding-box",
+    }
+    sys.argv = [aliases.get(arg, arg) for arg in sys.argv]
+
+
 def _compute_joint_pos_targets(
     actions: np.ndarray,
     prev_targets: np.ndarray,
@@ -182,6 +349,8 @@ class MujocoEnvNoRos:
         control_dt: float,
         device: str,
         obs_list: list[str],
+        visualize_keypoints: bool,
+        visualize_grasp_bounding_box: bool,
     ):
         self.sim = sim
         self.object_scales = object_scales
@@ -191,6 +360,8 @@ class MujocoEnvNoRos:
         self.control_dt = control_dt
         self.device = device
         self.obs_list = obs_list
+        self.visualize_keypoints = visualize_keypoints
+        self.visualize_grasp_bounding_box = visualize_grasp_bounding_box
 
     @property
     def sim_steps_per_control_step(self) -> int:
@@ -254,6 +425,13 @@ class MujocoEnvNoRos:
         for _ in range(self.sim_steps_per_control_step):
             self.sim.sim_step()
             if self.sim.viewer is not None:
+                if self.visualize_keypoints or self.visualize_grasp_bounding_box:
+                    _draw_debug_markers(
+                        self.sim,
+                        self.object_scales,
+                        self.visualize_keypoints,
+                        self.visualize_grasp_bounding_box,
+                    )
                 self.sim.viewer.sync()
 
 
@@ -267,6 +445,8 @@ class MujocoEnvNoRosArgs:
     sim_hz: float = 600.0
     control_hz: float = 60.0
     show_robot_collision_overlay: bool = True
+    visualize_keypoints: bool = False
+    visualize_grasp_bounding_box: bool = False
     press_enter_to_execute: bool = False
     record_video: bool = False
     video_path: Path = Path("mujoco_rollout.mp4")
@@ -293,7 +473,12 @@ def _policy_obs_list(policy: RlPlayer) -> list[str]:
     return policy.cfg.get("task", {}).get("env", {}).get("obsList", DEFAULT_OBS_LIST)
 
 
-def _wait_for_enter_to_start(sim: MujocoSim) -> bool:
+def _wait_for_enter_to_start(
+    sim: MujocoSim,
+    visualize_keypoints: bool,
+    visualize_grasp_bounding_box: bool,
+    object_scales: np.ndarray,
+) -> bool:
     print("Adjust the MuJoCo viewer, then press Enter to start the rollout (Ctrl-D to quit).", flush=True)
     if not sys.stdin.isatty():
         return sys.stdin.readline() != ""
@@ -303,6 +488,13 @@ def _wait_for_enter_to_start(sim: MujocoSim) -> bool:
         if readable:
             return sys.stdin.readline() != ""
         if sim.viewer is not None:
+            if visualize_keypoints or visualize_grasp_bounding_box:
+                _draw_debug_markers(
+                    sim,
+                    object_scales,
+                    visualize_keypoints,
+                    visualize_grasp_bounding_box,
+                )
             sim.viewer.sync()
     return False
 
@@ -388,6 +580,7 @@ class MujocoMp4Recorder:
 
 
 def main() -> None:
+    _normalize_cli_flag_aliases()
     args = tyro.cli(MujocoEnvNoRosArgs)
     if not args.config_path.exists():
         raise FileNotFoundError(f"Config not found: {args.config_path}")
@@ -417,18 +610,23 @@ def main() -> None:
         device=device,
     )
     obs_list = _policy_obs_list(policy)
+    object_scales = _object_scales(args.object_name)
     env = MujocoEnvNoRos(
         sim=sim,
-        object_scales=_object_scales(args.object_name),
+        object_scales=object_scales,
         hand_moving_average=0.1,
         arm_moving_average=0.1,
         hand_dof_speed_scale=1.5,
         control_dt=1.0 / args.control_hz,
         device=device,
         obs_list=obs_list,
+        visualize_keypoints=args.visualize_keypoints,
+        visualize_grasp_bounding_box=args.visualize_grasp_bounding_box,
     )
 
-    if args.press_enter_to_execute and not _wait_for_enter_to_start(sim):
+    if args.press_enter_to_execute and not _wait_for_enter_to_start(
+        sim, args.visualize_keypoints, args.visualize_grasp_bounding_box, object_scales
+    ):
         return
 
     recorder = None

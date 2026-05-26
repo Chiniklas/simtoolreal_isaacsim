@@ -64,7 +64,16 @@ The replay/player path is tuned for this six-block policy shape
 not use one-block debug settings such as `--num_envs 16` with
 `expl_coef_block_size=16` for checkpoints you plan to replay.
 
-Scaled SAPO / mixed-exploration training:
+Pretrained-shaped SAPO / mixed-exploration training for this machine:
+
+```bash
+python simtoolreal_lab/train_rl_games.py \
+  --task simtoolreal_sharpa \
+  --headless \
+  agent.wandb_activate=False
+```
+
+Equivalent explicit command:
 
 ```bash
 python simtoolreal_lab/train_rl_games.py \
@@ -75,9 +84,9 @@ python simtoolreal_lab/train_rl_games.py \
   agent.wandb_activate=False
 ```
 
-The reference training launcher defaults to `24576` envs with
-`expl_coef_block_size=4096`; the scaled command above uses `1536 / 256` to keep
-the same six-block SAPO structure while fitting on a smaller single-GPU budget.
+The pretrained reference training launcher used `24576` envs with
+`expl_coef_block_size=4096`; this repo defaults to `1536 / 256` to keep the same
+six-block SAPO structure while fitting on this single-GPU budget.
 
 The reference SAPO settings live in
 `simtoolreal_lab/tasks/simtoolreal_sharpa/agents/rl_games_sapo_cfg.yaml`. The
@@ -89,7 +98,7 @@ randomization only for ablations, debugging, or intentionally fixed-object
 runs.
 
 Checkpoint behavior comes from the RL-Games agent config. The default
-`save_frequency: 1000` writes `nn/model_<epoch>.pth` every 1000 epochs.
+`save_frequency: 3000` writes `nn/model_<epoch>.pth` every 3000 epochs.
 Independently, `last/model.pth` is refreshed every 3 epochs, and every new best
 mean reward after `save_best_after: 100` updates `best/model.pth` directly.
 
@@ -121,13 +130,18 @@ Active reset and task randomization:
   multi-object training, or `'[1.0,1.0]'` for fixed-size single-object runs
 - random delta goal sampling with `env.delta_goal_distance=0.1` and
   `env.delta_rotation_degrees=90.0`
+- target volume follows the pretrained config:
+  `env.target_volume_mins='[-0.35,-0.1,0.68]'`,
+  `env.target_volume_maxs='[0.35,0.2,1.05]'`
+- `env.reset_when_dropped=True`
 
 Active external object disturbance randomization:
 
-- `env.force_scale=20.0`, `env.force_prob_range='[0.001,0.1]'`,
+- `env.force_scale=2.0`, `env.force_prob_range='[0.001,0.1]'`,
+  `env.force_decay=0.99`,
   `env.force_only_when_lifted=True`
-- `env.torque_scale=2.0`, `env.torque_prob_range='[0.001,0.1]'`,
-  `env.torque_only_when_lifted=True`
+- `env.torque_scale=0.0` because the proven pretrained config does not enable
+  random torque disturbances
 
 Active sim2real delay/noise randomization:
 
@@ -136,7 +150,7 @@ Active sim2real delay/noise randomization:
 - `env.use_object_state_delay_noise=True`, `env.object_state_delay_max=10`,
   `env.object_state_xyz_noise_std=0.01`,
   `env.object_state_rotation_noise_degrees=5.0`
-- `env.joint_velocity_obs_noise_std=0.1`
+- `env.joint_velocity_obs_noise_std=0.01`
 
 The reference YAML also contains IsaacGym's generic `task.randomization_params`
 block for gravity, action/observation noise, robot/object mass, stiffness,

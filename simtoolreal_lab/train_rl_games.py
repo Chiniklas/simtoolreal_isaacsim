@@ -24,6 +24,17 @@ parser.add_argument("--distributed", action="store_true", default=False, help="R
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to checkpoint.")
 parser.add_argument("--sigma", type=str, default=None, help="Initial policy standard deviation.")
 parser.add_argument("--max_iterations", type=int, default=None, help="Maximum RL-Games epochs.")
+parser.add_argument("--agent_cfg", type=str, default=None, help="Path or agents/ filename for an RL-Games YAML recipe.")
+parser.add_argument(
+    "--visualize_grasp_bounding_box",
+    "--visualize-grasp-bounding-box",
+    "--visualize_grasp_bouding_box",
+    "--visualize-grasp-bouding-box",
+    dest="visualize_grasp_bounding_box",
+    action="store_true",
+    default=False,
+    help="Draw the handle-centered grasp bounding box in the Isaac viewer.",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 if args_cli.video:
@@ -41,6 +52,7 @@ if VENDORED_RL_GAMES.is_dir():
     sys.path.insert(0, str(VENDORED_RL_GAMES))
 
 import gymnasium as gym
+import yaml
 from rl_games.common import env_configurations, vecenv
 from rl_games.common.algo_observer import IsaacAlgoObserver
 from rl_games.torch_runner import Runner
@@ -55,6 +67,47 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import simtoolreal_lab.tasks.simtoolreal_sharpa.gym_setup  # noqa: F401
 from simtoolreal_lab.tasks.simtoolreal_sharpa.simtoolreal_sharpa_env_cfg import apply_object_selection
+
+
+AGENTS_DIR = pathlib.Path(__file__).resolve().parent / "tasks" / "simtoolreal_sharpa" / "agents"
+
+
+def _load_agent_cfg_override(agent_cfg_path: str) -> dict:
+    path = pathlib.Path(agent_cfg_path).expanduser()
+    if not path.exists():
+        path = AGENTS_DIR / agent_cfg_path
+    if not path.exists():
+        raise FileNotFoundError(f"Agent cfg not found: {agent_cfg_path}")
+    with path.open() as f:
+        loaded_cfg = yaml.safe_load(f)
+    if not isinstance(loaded_cfg, dict) or "params" not in loaded_cfg:
+        raise ValueError(f"Agent cfg must be a YAML mapping with a top-level 'params' key: {path}")
+    print(f"[INFO]: Loading agent cfg from: {path}")
+    return loaded_cfg
+
+
+def _set_cfg_value(cfg, key_path: str, value):
+    target = cfg
+    keys = key_path.split(".")
+    for key in keys[:-1]:
+        if not hasattr(target, key):
+            raise AttributeError(f"Unknown env cfg key '{key_path}': missing '{key}'.")
+        target = getattr(target, key)
+    final_key = keys[-1]
+    if not hasattr(target, final_key):
+        raise AttributeError(f"Unknown env cfg key '{key_path}': missing '{final_key}'.")
+    setattr(target, final_key, value)
+
+
+def _apply_agent_env_cfg(env_cfg, agent_cfg: dict) -> None:
+    env_overrides = agent_cfg.get("env_cfg", {})
+    for key_path, value in env_overrides.items():
+        _set_cfg_value(env_cfg, key_path, value)
+
+    if "sim_dt" in env_overrides:
+        env_cfg.sim.dt = env_cfg.sim_dt
+    if "decimation" in env_overrides:
+        env_cfg.sim.render_interval = env_cfg.decimation
 
 
 class SimToolRealRlGamesVecEnvWrapper(RlGamesVecEnvWrapper):
@@ -94,8 +147,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if args_cli.seed == -1:
         args_cli.seed = int(time.time())
 
+    if args_cli.agent_cfg is not None:
+        agent_cfg = _load_agent_cfg_override(args_cli.agent_cfg)
+
+    _apply_agent_env_cfg(env_cfg, agent_cfg)
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    if args_cli.visualize_grasp_bounding_box:
+        env_cfg.debug_grasp_bounding_box = True
     apply_object_selection(env_cfg)
     agent_cfg["params"]["seed"] = args_cli.seed if args_cli.seed is not None else agent_cfg["params"]["seed"]
     agent_cfg["params"]["config"]["max_epochs"] = (
