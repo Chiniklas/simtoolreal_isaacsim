@@ -99,6 +99,28 @@ def _set_cfg_value(cfg, key_path: str, value):
     setattr(target, final_key, value)
 
 
+def _set_dict_value(mapping: dict, key_path: str, value) -> None:
+    target = mapping
+    keys = key_path.split(".")
+    for key in keys[:-1]:
+        if key not in target or not isinstance(target[key], dict):
+            raise KeyError(f"Unknown agent cfg key '{key_path}': missing '{key}'.")
+        target = target[key]
+    final_key = keys[-1]
+    if final_key not in target:
+        raise KeyError(f"Unknown agent cfg key '{key_path}': missing '{final_key}'.")
+    target[final_key] = value
+
+
+def _parse_cli_override(arg: str) -> tuple[str, object] | None:
+    if "=" not in arg:
+        return None
+    key, raw_value = arg.split("=", 1)
+    if not key.startswith(("env.", "agent.")):
+        return None
+    return key, yaml.safe_load(raw_value)
+
+
 def _apply_agent_env_cfg(env_cfg, agent_cfg: dict) -> None:
     env_overrides = agent_cfg.get("env_cfg", {})
     for key_path, value in env_overrides.items():
@@ -107,6 +129,25 @@ def _apply_agent_env_cfg(env_cfg, agent_cfg: dict) -> None:
     if "sim_dt" in env_overrides:
         env_cfg.sim.dt = env_cfg.sim_dt
     if "decimation" in env_overrides:
+        env_cfg.sim.render_interval = env_cfg.decimation
+
+
+def _apply_cli_config_overrides(env_cfg, agent_cfg: dict) -> None:
+    env_timing_changed = False
+    for arg in hydra_args:
+        parsed = _parse_cli_override(arg)
+        if parsed is None:
+            continue
+        key_path, value = parsed
+        if key_path.startswith("env."):
+            env_key = key_path.removeprefix("env.")
+            _set_cfg_value(env_cfg, env_key, value)
+            env_timing_changed = env_timing_changed or env_key in {"sim_dt", "decimation"}
+        elif key_path.startswith("agent."):
+            _set_dict_value(agent_cfg, key_path.removeprefix("agent."), value)
+
+    if env_timing_changed:
+        env_cfg.sim.dt = env_cfg.sim_dt
         env_cfg.sim.render_interval = env_cfg.decimation
 
 
@@ -151,6 +192,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         agent_cfg = _load_agent_cfg_override(args_cli.agent_cfg)
 
     _apply_agent_env_cfg(env_cfg, agent_cfg)
+    _apply_cli_config_overrides(env_cfg, agent_cfg)
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     if args_cli.visualize_grasp_bounding_box:
