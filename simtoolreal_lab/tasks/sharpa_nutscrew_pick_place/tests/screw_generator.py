@@ -17,36 +17,44 @@ for manipulation:
 
 This script is a native Python replacement for the Maker-space OpenSCAD idea. It
 does not require OpenSCAD or BOSL2. It writes simple ASCII USD mesh files that
-Isaac Sim can load directly. The generated assets are intentionally low detail:
-good enough for task development, visualization, grasping, and early RL tests,
-but not meant to be manufacturing-grade CAD.
+Isaac Sim can load directly, and can also export OBJ/STL meshes for MuJoCo or
+other sim2sim pipelines. The generated assets are intentionally low detail: good
+enough for task development, visualization, grasping, and early RL tests, but
+not meant to be manufacturing-grade CAD.
 
 Coordinate and scale conventions
 --------------------------------
 All generated geometry follows these conventions:
 
 * Units: meters.
-* Origin: center of the complete generated mesh bounding box.
-* Axis: local Z is the screw/nut/washer rotational axis.
-* Screw orientation: shaft extends downward from the head before recentering.
-  After recentering, the whole object is centered around the origin.
+* Screw origin: center of the head bearing surface, where the threaded shaft
+  starts.
+* Screw axis: local ``+Z`` points from the head into/along the thread.
+* Nut/washer origin: center of the complete generated mesh bounding box.
+* Nut/washer axis: local Z is the rotational axis.
 * Meshes are visual meshes only. If you need production physics, add simplified
-  collision approximation in the task config or as a separate collision USD.
+  collision approximation in the task config, MJCF, or as a separate collision
+  asset.
 
 Default output
 --------------
-By default this writes a complete M6/M10 set matching the current asset names:
+By default this writes USD files for a complete metric set listed in ``SPECS``:
 
-* ``M6X5.usd``, ``M6X8.usd``, ..., ``M6X70.usd``
-* ``M6_nut.usd``, ``M6_nut_low.usd``, ``M6_nut_flange.usd``
-* ``M6_domenut.usd``, ``M6_wingnut.usd``
-* ``M6_washer.usd``, ``M6_washer_extended.usd``
-* the same pattern for M10
+* ``M8X20.usd``, ``M10X25.usd``, ``M12X40.usd``, etc.
+* ``M8_nut.usd``, ``M10_nut_low.usd``, ``M12_nut_flange.usd``
+* ``M16_domenut.usd``, ``M20_wingnut.usd``
+* ``M8_washer.usd``, ``M20_washer_extended.usd``
+
+Pass ``--formats usd obj stl`` to write matching ``.obj`` and ``.stl`` files
+next to each USD. OBJ/STL output is triangulated because MuJoCo and many mesh
+toolchains are happier with triangle-only meshes.
 
 Generated assets go to:
 
-``simtoolreal_lab/assets/nutscrew_generated/M6``
+``simtoolreal_lab/assets/nutscrew_generated/M8``
 ``simtoolreal_lab/assets/nutscrew_generated/M10``
+``simtoolreal_lab/assets/nutscrew_generated/M12``
+...
 
 Typical usage
 -------------
@@ -67,6 +75,15 @@ Generate lower-detail assets for faster loading:
 .. code-block:: bash
 
     python simtoolreal_lab/tasks/sharpa_nutscrew_pick_place/tests/screw_generator.py --segments 24 --thread-steps-per-turn 5 --overwrite
+
+Generate USD, OBJ, and STL assets for MuJoCo sim2sim checks:
+
+.. code-block:: bash
+
+    python simtoolreal_lab/tasks/sharpa_nutscrew_pick_place/tests/screw_generator.py \\
+      --families M8 M10 M12 M16 M20 \\
+      --formats usd obj stl \\
+      --overwrite
 
 Visualize the generated assets:
 
@@ -132,6 +149,19 @@ SPECS = {
         washer_extended_od_mm=24.0,
         washer_extended_height_mm=2.0,
     ),
+    "M8": MetricSpec(
+        diameter_mm=8.0,
+        pitch_mm=1.25,
+        head_diameter_mm=13.0,
+        head_height_mm=8.0,
+        nut_width_mm=13.0,
+        nut_height_mm=6.5,
+        washer_id_mm=8.4,
+        washer_od_mm=16.0,
+        washer_height_mm=1.6,
+        washer_extended_od_mm=30.0,
+        washer_extended_height_mm=2.5,
+    ),
     "M10": MetricSpec(
         diameter_mm=10.0,
         pitch_mm=1.5,
@@ -145,11 +175,54 @@ SPECS = {
         washer_extended_od_mm=40.0,
         washer_extended_height_mm=3.0,
     ),
+    "M12": MetricSpec(
+        diameter_mm=12.0,
+        pitch_mm=1.75,
+        head_diameter_mm=18.0,
+        head_height_mm=12.0,
+        nut_width_mm=19.0,
+        nut_height_mm=10.0,
+        washer_id_mm=13.0,
+        washer_od_mm=24.0,
+        washer_height_mm=2.5,
+        washer_extended_od_mm=50.0,
+        washer_extended_height_mm=3.5,
+    ),
+    "M16": MetricSpec(
+        diameter_mm=16.0,
+        pitch_mm=2.0,
+        head_diameter_mm=24.0,
+        head_height_mm=16.0,
+        nut_width_mm=24.0,
+        nut_height_mm=13.0,
+        washer_id_mm=17.0,
+        washer_od_mm=30.0,
+        washer_height_mm=3.0,
+        washer_extended_od_mm=60.0,
+        washer_extended_height_mm=4.5,
+    ),
+    "M20": MetricSpec(
+        diameter_mm=20.0,
+        pitch_mm=2.5,
+        head_diameter_mm=30.0,
+        head_height_mm=20.0,
+        nut_width_mm=30.0,
+        nut_height_mm=16.0,
+        washer_id_mm=21.0,
+        washer_od_mm=37.0,
+        washer_height_mm=3.0,
+        washer_extended_od_mm=60.0,
+        washer_extended_height_mm=4.0,
+    ),
 }
 
 SCREW_LENGTHS = {
     "M6": (5, 8, 10, 12, 15, 20, 25, 70),
+    "M8": (8, 10, 12, 15, 20, 25, 30, 40),
     "M10": (5, 8, 10, 12, 15, 20, 25, 30),
+    "M12": (12, 15, 20, 25, 30, 40, 50),
+    "M16": (20, 25, 30, 40, 50, 60),
+    "M20": (20, 30, 40, 50, 60),
 }
 
 
@@ -366,6 +439,8 @@ def screw_mesh(spec: MetricSpec, shaft_length_mm: float, segments: int, steps_pe
     faces: list[list[int]] = []
     shaft_length = mm(shaft_length_mm)
     head_height = mm(spec.head_height_mm)
+    # The screw frame is intentional: origin at the head bearing surface,
+    # threaded shaft along +Z, head volume behind the origin along -Z.
     shaft, shaft_faces = helical_threaded_shaft(
         diameter=mm(spec.diameter_mm),
         pitch=mm(spec.pitch_mm),
@@ -375,9 +450,9 @@ def screw_mesh(spec: MetricSpec, shaft_length_mm: float, segments: int, steps_pe
         z_min=0.0,
     )
     append_mesh(vertices, faces, shaft, shaft_faces)
-    head, head_faces = cylinder(mm(spec.head_diameter_mm) * 0.5, head_height, segments, z_min=shaft_length)
+    head, head_faces = cylinder(mm(spec.head_diameter_mm) * 0.5, head_height, segments, z_min=-head_height)
     append_mesh(vertices, faces, head, head_faces)
-    return recenter(vertices), faces
+    return vertices, faces
 
 
 def nut_mesh(spec: MetricSpec, height_scale: float, segments: int) -> tuple[list[tuple[float, float, float]], list[list[int]]]:
@@ -445,6 +520,33 @@ def usd_array(values, tuple_size: int | None = None) -> str:
     return "[" + ", ".join(chunks) + "]"
 
 
+def triangulate_faces(faces: list[list[int]]) -> list[tuple[int, int, int]]:
+    triangles: list[tuple[int, int, int]] = []
+    for face in faces:
+        if len(face) < 3:
+            continue
+        anchor = face[0]
+        for i in range(1, len(face) - 1):
+            triangles.append((anchor, face[i], face[i + 1]))
+    return triangles
+
+
+def face_normal(
+    a: tuple[float, float, float],
+    b: tuple[float, float, float],
+    c: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    ux, uy, uz = b[0] - a[0], b[1] - a[1], b[2] - a[2]
+    vx, vy, vz = c[0] - a[0], c[1] - a[1], c[2] - a[2]
+    nx = uy * vz - uz * vy
+    ny = uz * vx - ux * vz
+    nz = ux * vy - uy * vx
+    length = math.sqrt(nx * nx + ny * ny + nz * nz)
+    if length <= 1.0e-12:
+        return (0.0, 0.0, 0.0)
+    return (nx / length, ny / length, nz / length)
+
+
 def write_usd(path: Path, vertices: list[tuple[float, float, float]], faces: list[list[int]], color: tuple[float, float, float]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     counts = [len(face) for face in faces]
@@ -463,19 +565,77 @@ def write_usd(path: Path, vertices: list[tuple[float, float, float]], faces: lis
         f.write("    }\n}\n")
 
 
-def generate_family(family: str, output_root: Path, segments: int, thread_steps_per_turn: int, overwrite: bool) -> None:
+def write_obj(path: Path, vertices: list[tuple[float, float, float]], faces: list[list[int]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    triangles = triangulate_faces(faces)
+    with path.open("w", encoding="utf-8") as f:
+        f.write("# Generated by screw_generator.py\n")
+        f.write("# Units: meters. Axes match the USD export.\n")
+        f.write(f"o {path.stem}\n")
+        for x, y, z in vertices:
+            f.write(f"v {x:.9g} {y:.9g} {z:.9g}\n")
+        for i, j, k in triangles:
+            f.write(f"f {i + 1} {j + 1} {k + 1}\n")
+
+
+def write_stl(path: Path, vertices: list[tuple[float, float, float]], faces: list[list[int]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    triangles = triangulate_faces(faces)
+    solid_name = path.stem.replace(" ", "_")
+    with path.open("w", encoding="utf-8") as f:
+        f.write(f"solid {solid_name}\n")
+        for i, j, k in triangles:
+            a, b, c = vertices[i], vertices[j], vertices[k]
+            nx, ny, nz = face_normal(a, b, c)
+            f.write(f"  facet normal {nx:.9g} {ny:.9g} {nz:.9g}\n")
+            f.write("    outer loop\n")
+            f.write(f"      vertex {a[0]:.9g} {a[1]:.9g} {a[2]:.9g}\n")
+            f.write(f"      vertex {b[0]:.9g} {b[1]:.9g} {b[2]:.9g}\n")
+            f.write(f"      vertex {c[0]:.9g} {c[1]:.9g} {c[2]:.9g}\n")
+            f.write("    endloop\n")
+            f.write("  endfacet\n")
+        f.write(f"endsolid {solid_name}\n")
+
+
+def write_asset(
+    stem_path: Path,
+    vertices: list[tuple[float, float, float]],
+    faces: list[list[int]],
+    color: tuple[float, float, float],
+    formats: set[str],
+    overwrite: bool,
+) -> None:
+    writers = {
+        "usd": lambda output_path: write_usd(output_path, vertices, faces, color),
+        "obj": lambda output_path: write_obj(output_path, vertices, faces),
+        "stl": lambda output_path: write_stl(output_path, vertices, faces),
+    }
+    for fmt in ("usd", "obj", "stl"):
+        if fmt not in formats:
+            continue
+        path = stem_path.with_suffix(f".{fmt}")
+        if path.exists() and not overwrite:
+            print(f"[SKIP] {path}")
+            continue
+        writers[fmt](path)
+        print(f"[OK] {path} vertices={len(vertices)} faces={len(faces)}")
+
+
+def generate_family(
+    family: str,
+    output_root: Path,
+    segments: int,
+    thread_steps_per_turn: int,
+    overwrite: bool,
+    formats: set[str],
+) -> None:
     spec = SPECS[family]
     family_root = output_root / family
     color = (0.82, 0.82, 0.8)
 
     for length in SCREW_LENGTHS[family]:
-        path = family_root / f"{family}X{length}.usd"
-        if path.exists() and not overwrite:
-            print(f"[SKIP] {path}")
-            continue
         vertices, faces = screw_mesh(spec, length, segments, thread_steps_per_turn)
-        write_usd(path, vertices, faces, color)
-        print(f"[OK] {path} vertices={len(vertices)} faces={len(faces)}")
+        write_asset(family_root / f"{family}X{length}", vertices, faces, color, formats, overwrite)
 
     generators = {
         f"{family}_nut": lambda: nut_mesh(spec, 1.0, segments),
@@ -487,28 +647,38 @@ def generate_family(family: str, output_root: Path, segments: int, thread_steps_
         f"{family}_washer_extended": lambda: washer_mesh(spec, True, segments),
     }
     for name, generator in generators.items():
-        path = family_root / f"{name}.usd"
-        if path.exists() and not overwrite:
-            print(f"[SKIP] {path}")
-            continue
         vertices, faces = generator()
-        write_usd(path, vertices, faces, color)
-        print(f"[OK] {path} vertices={len(vertices)} faces={len(faces)}")
+        write_asset(family_root / name, vertices, faces, color, formats, overwrite)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate low-poly M6/M10 nut and screw USD assets.")
-    parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT, help="Output root containing M6/M10 folders.")
+    parser = argparse.ArgumentParser(description="Generate low-poly metric nut and screw mesh assets.")
+    parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT, help="Output root containing metric family folders.")
     parser.add_argument("--families", nargs="+", choices=sorted(SPECS), default=sorted(SPECS), help="Metric families to generate.")
+    parser.add_argument(
+        "--formats",
+        nargs="+",
+        choices=("usd", "obj", "stl"),
+        default=("usd",),
+        help="Mesh formats to export. Use '--formats usd obj stl' for Isaac Sim plus MuJoCo assets.",
+    )
     parser.add_argument("--segments", type=int, default=36, help="Radial segment count for cylindrical/annular geometry.")
     parser.add_argument("--thread-steps-per-turn", type=int, default=8, help="Longitudinal thread resolution per pitch turn.")
-    parser.add_argument("--overwrite", action="store_true", help="Overwrite existing generated USD files.")
+    parser.add_argument("--overwrite", action="store_true", help="Overwrite existing generated mesh files.")
     args = parser.parse_args()
 
     segments = max(12, int(args.segments))
     thread_steps_per_turn = max(3, int(args.thread_steps_per_turn))
+    formats = set(args.formats)
     for family in args.families:
-        generate_family(family, args.output_root.expanduser().resolve(), segments, thread_steps_per_turn, args.overwrite)
+        generate_family(
+            family,
+            args.output_root.expanduser().resolve(),
+            segments,
+            thread_steps_per_turn,
+            args.overwrite,
+            formats,
+        )
 
 
 if __name__ == "__main__":
