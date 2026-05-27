@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import xml.etree.ElementTree as ET
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -70,6 +71,7 @@ ROBOT_URDF_PATH = (
     / "assets/kuka_sharpa/urdf/kuka_sharpa_description/iiwa14_left_sharpa_adjusted_restricted.urdf"
 )
 MUJOCO_REPLAY_SCENE_PATH = SIMTOOLREAL_LAB_DIR / "assets/mujoco_wasm/scenes/iiwa_sharpa.xml"
+MUJOCO_REPLAY_MESH_DIR = MUJOCO_REPLAY_SCENE_PATH.parent / "meshes/iiwa_sharpa"
 DEXTOOLBENCH_ASSET_DIR = SIMTOOLREAL_LAB_DIR / "assets/dextoolbench"
 TABLE_POS = np.array([0.0, 0.0, 0.38])
 TABLE_SIZE = np.array([0.475, 0.4, 0.3])
@@ -123,6 +125,194 @@ def _maybe_import_viewer():
     return mujoco.viewer
 
 
+def _dextoolbench_mesh_path(object_name: str) -> Path:
+    if object_name not in DEXTOOLBENCH_OBJECT_SCALES:
+        known = ", ".join(sorted(DEXTOOLBENCH_OBJECT_SCALES))
+        raise ValueError(f"Unknown DexToolBench object '{object_name}'. Known objects: {known}")
+    matches = sorted(DEXTOOLBENCH_ASSET_DIR.glob(f"*/*/{object_name}.obj"))
+    if not matches:
+        raise FileNotFoundError(f"Missing DexToolBench OBJ for '{object_name}' under {DEXTOOLBENCH_ASSET_DIR}")
+    if len(matches) > 1:
+        paths = ", ".join(str(path) for path in matches)
+        raise RuntimeError(f"Ambiguous DexToolBench OBJ for '{object_name}': {paths}")
+    return matches[0]
+
+
+def _obj_bounds(mesh_path: Path, mesh_scale: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+    scale = np.ones(3) if mesh_scale is None else np.asarray(mesh_scale, dtype=float)
+    vertices = []
+    with mesh_path.open("r", encoding="utf-8", errors="ignore") as obj_file:
+        for line in obj_file:
+            if line.startswith("v "):
+                vertices.append([float(value) for value in line.split()[1:4]])
+    if not vertices:
+        raise ValueError(f"OBJ has no vertices: {mesh_path}")
+    vertices = np.asarray(vertices, dtype=float) * scale
+    return vertices.min(axis=0), vertices.max(axis=0)
+
+
+def _set_or_append(parent: ET.Element, tag: str, attributes: dict[str, str]) -> ET.Element:
+    name = attributes.get("name")
+    if name is not None:
+        for child in parent.findall(tag):
+            if child.attrib.get("name") == name:
+                child.attrib.update(attributes)
+                return child
+    child = ET.SubElement(parent, tag)
+    child.attrib.update(attributes)
+    return child
+
+
+def _remove_child_tags(parent: ET.Element, tags: set[str]) -> None:
+    for child in list(parent):
+        if child.tag in tags:
+            parent.remove(child)
+
+
+def _format_vec(values: np.ndarray | tuple[float, ...]) -> str:
+    return " ".join(f"{float(value):.8g}" for value in values)
+
+
+def _add_proxy_object_collision(body: ET.Element, object_name: str, prefix: str) -> None:
+    if object_name == "claw_hammer":
+        ET.SubElement(
+            body,
+            "geom",
+            {
+                "name": f"{prefix}_handle_collision_proxy",
+                "type": "box",
+                "size": "0.10 0.015 0.01",
+                "rgba": "0.5 0.5 0.5 0",
+                "density": "400",
+                "condim": "6",
+                "friction": "1 0.005 0.0001",
+                "group": "3",
+            },
+        )
+        ET.SubElement(
+            body,
+            "geom",
+            {
+                "name": f"{prefix}_head_collision_proxy",
+                "type": "capsule",
+                "fromto": "0.10 -0.03 0 0.10 0.03 0",
+                "size": "0.02",
+                "rgba": "0.4 0.4 0.4 0",
+                "density": "300",
+                "condim": "6",
+                "friction": "1 0.005 0.0001",
+                "group": "3",
+            },
+        )
+        return
+
+    mesh_path = _dextoolbench_mesh_path(object_name)
+    mins, maxs = _obj_bounds(mesh_path)
+    ET.SubElement(
+        body,
+        "geom",
+        {
+            "name": f"{prefix}_collision_box_proxy",
+            "type": "box",
+            "pos": _format_vec(0.5 * (mins + maxs)),
+            "size": _format_vec(np.maximum(0.5 * (maxs - mins), np.array([0.005, 0.005, 0.005]))),
+            "rgba": "0.5 0.5 0.5 0",
+            "density": "400",
+            "condim": "6",
+            "friction": "1 0.005 0.0001",
+            "group": "3",
+        },
+    )
+
+
+def _scene_xml_with_dextoolbench_object(scene_xml_path: Path, config: "MujocoSimConfig") -> str:
+    tree = ET.parse(scene_xml_path)
+    root = tree.getroot()
+
+    compiler = root.find("compiler")
+    if compiler is not None:
+        compiler.set("meshdir", str(MUJOCO_REPLAY_MESH_DIR.resolve()))
+
+    asset = root.find("asset")
+    if asset is None:
+        asset = ET.SubElement(root, "asset")
+
+    mesh_path = _dextoolbench_mesh_path(config.object_name)
+    mesh_name = f"simtoolreal_{config.object_name}_visual_mesh"
+    _set_or_append(
+        asset,
+        "mesh",
+        {
+            "name": mesh_name,
+            "file": str(mesh_path.resolve()),
+        },
+    )
+
+    worldbody = root.find("worldbody")
+    if worldbody is None:
+        raise RuntimeError(f"MuJoCo scene has no worldbody: {scene_xml_path}")
+    object_body = worldbody.find("./body[@name='object']")
+    goal_body = worldbody.find("./body[@name='goal_object']")
+    if object_body is None:
+        raise RuntimeError(f"MuJoCo scene has no object body: {scene_xml_path}")
+
+    object_body.set("pos", _format_vec(config.object_start_pos))
+    object_body.set("quat", _format_vec(config.object_start_quat_wxyz))
+    _remove_child_tags(object_body, {"geom"})
+    ET.SubElement(
+        object_body,
+        "geom",
+        {
+            "name": f"object_{config.object_name}_visual",
+            "type": "mesh",
+            "mesh": mesh_name,
+            "rgba": "0.62 0.62 0.62 1",
+            "contype": "0",
+            "conaffinity": "0",
+            "density": "0",
+            "group": "1",
+        },
+    )
+    if config.use_proxy_object_collision:
+        _add_proxy_object_collision(object_body, config.object_name, "object")
+    else:
+        ET.SubElement(
+            object_body,
+            "geom",
+            {
+                "name": f"object_{config.object_name}_mesh_collision",
+                "type": "mesh",
+                "mesh": mesh_name,
+                "rgba": "0.62 0.62 0.62 1",
+                "density": "400",
+                "condim": "6",
+                "friction": "1 0.005 0.0001",
+                "group": "3",
+            },
+        )
+
+    if goal_body is not None:
+        goal_body.set("pos", _format_vec(config.goal_object_start_pos))
+        goal_body.set("quat", _format_vec(config.goal_object_start_quat_wxyz))
+        _remove_child_tags(goal_body, {"geom"})
+        ET.SubElement(
+            goal_body,
+            "geom",
+            {
+                "name": f"goal_{config.object_name}_visual",
+                "type": "mesh",
+                "mesh": mesh_name,
+                "rgba": "0 1 0 0.35",
+                "contype": "0",
+                "conaffinity": "0",
+                "density": "0",
+                "group": "1",
+            },
+        )
+
+    return ET.tostring(root, encoding="unicode")
+
+
 class MujocoSim:
     """MuJoCo replay scene based on the browser demo MJCF assets."""
 
@@ -137,13 +327,19 @@ class MujocoSim:
     def _init_scene(self) -> None:
         if not self.config.scene_xml_path.exists():
             raise FileNotFoundError(f"MuJoCo scene XML not found: {self.config.scene_xml_path}")
-        if self.config.object_name != "claw_hammer":
+        if self.config.object_name in DEXTOOLBENCH_OBJECT_SCALES:
+            scene_xml = _scene_xml_with_dextoolbench_object(self.config.scene_xml_path, self.config)
+            print(
+                f"[MuJoCo] Visualizing DexToolBench object '{self.config.object_name}' "
+                f"with {'proxy' if self.config.use_proxy_object_collision else 'mesh'} collision."
+            )
+            self.mj_model = self.mujoco.MjModel.from_xml_string(scene_xml)
+        else:
             print(
                 "[MuJoCo] The browser-demo MJCF scene uses its built-in hammer object; "
                 f"--object-name {self.config.object_name!r} only changes policy object scale metadata."
             )
-
-        self.mj_model = self.mujoco.MjModel.from_xml_path(str(self.config.scene_xml_path))
+            self.mj_model = self.mujoco.MjModel.from_xml_path(str(self.config.scene_xml_path))
         self.mj_data = self.mujoco.MjData(self.mj_model)
         self.mj_model.opt.timestep = self.config.sim_dt
         if self.config.enable_viewer:
@@ -157,17 +353,8 @@ class MujocoSim:
 
     def _set_scene_initial_state(self) -> None:
         self.set_robot_joint_positions(INIT_JOINT_POS)
-        self._set_free_body_pose(
-            body_name="object",
-            pos=self.config.object_start_pos,
-            quat_wxyz=self.config.object_start_quat_wxyz,
-        )
-        if "goal_object" in self.body_names:
-            goal_body_id = self.mj_model.body(name="goal_object").id
-            mocap_id = int(self.mj_model.body_mocapid[goal_body_id])
-            if mocap_id >= 0:
-                self.mj_data.mocap_pos[mocap_id] = self.config.goal_object_start_pos
-                self.mj_data.mocap_quat[mocap_id] = self.config.goal_object_start_quat_wxyz
+        self.set_object_pose(self.config.object_start_pos, self.config.object_start_quat_wxyz)
+        self.set_goal_object_pose(self.config.goal_object_start_pos, self.config.goal_object_start_quat_wxyz)
         self.mujoco.mj_forward(self.mj_model, self.mj_data)
 
     def _set_free_body_pose(self, body_name: str, pos: np.ndarray, quat_wxyz: np.ndarray) -> None:
@@ -327,6 +514,43 @@ class MujocoSim:
         for body_name in ("object",):
             if body_name not in self.body_names:
                 raise RuntimeError(f"MuJoCo model is missing body '{body_name}'.")
+
+    def set_object_pose(self, pos: np.ndarray, quat_wxyz: np.ndarray) -> None:
+        self._set_free_body_pose("object", pos, quat_wxyz)
+        self.mujoco.mj_forward(self.mj_model, self.mj_data)
+
+    def set_goal_object_pose(self, pos: np.ndarray, quat_wxyz: np.ndarray) -> None:
+        if "goal_object" not in self.body_names:
+            return
+        goal_body_id = self.mj_model.body(name="goal_object").id
+        mocap_id = int(self.mj_model.body_mocapid[goal_body_id])
+        if mocap_id >= 0:
+            self.mj_data.mocap_pos[mocap_id] = pos
+            self.mj_data.mocap_quat[mocap_id] = quat_wxyz
+        else:
+            self._set_free_body_pose("goal_object", pos, quat_wxyz)
+        self.mujoco.mj_forward(self.mj_model, self.mj_data)
+
+    def reset_scene(
+        self,
+        object_pos: np.ndarray | None = None,
+        object_quat_wxyz: np.ndarray | None = None,
+        goal_object_pos: np.ndarray | None = None,
+        goal_object_quat_wxyz: np.ndarray | None = None,
+    ) -> None:
+        self.mujoco.mj_resetData(self.mj_model, self.mj_data)
+        self.set_robot_joint_pos_targets(INIT_JOINT_POS)
+        self.set_robot_joint_positions(INIT_JOINT_POS)
+        self.set_object_pose(
+            self.config.object_start_pos if object_pos is None else object_pos,
+            self.config.object_start_quat_wxyz if object_quat_wxyz is None else object_quat_wxyz,
+        )
+        self.set_goal_object_pose(
+            self.config.goal_object_start_pos if goal_object_pos is None else goal_object_pos,
+            self.config.goal_object_start_quat_wxyz
+            if goal_object_quat_wxyz is None
+            else goal_object_quat_wxyz,
+        )
 
     def set_robot_joint_positions(self, q: np.ndarray) -> None:
         if q.shape != (N_JOINTS,):

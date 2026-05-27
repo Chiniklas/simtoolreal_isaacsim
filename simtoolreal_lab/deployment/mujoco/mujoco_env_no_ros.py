@@ -16,6 +16,7 @@ from simtoolreal_lab.deployment.mujoco.mujoco_sim import (
     DEXTOOLBENCH_OBJECT_SCALES,
     MUJOCO_REPLAY_SCENE_PATH,
     SIMTOOLREAL_LAB_DIR,
+    TABLE_TOP_Z,
     MujocoSim,
     MujocoSimConfig,
 )
@@ -154,6 +155,12 @@ FINGERTIP_OFFSETS = np.array(
         [0.02, 0.002, 0.0],
     ]
 )
+# Gentle replay default: table top is z=0.53 and the object starts at z=0.58.
+# Keep randomized goals local and just above the tabletop unless explicitly overridden.
+DEFAULT_TARGET_VOLUME_MINS = (-0.12, -0.05, 0.62)
+DEFAULT_TARGET_VOLUME_MAXS = (0.12, 0.12, 0.72)
+DROP_RESET_ARMING_LIFT = 0.04
+TABLE_FALL_RESET_MARGIN = 0.03
 
 
 def _quat_wxyz_to_xyzw(q: np.ndarray) -> np.ndarray:
@@ -167,6 +174,21 @@ def _quat_rotate_xyzw(q: np.ndarray, v: np.ndarray) -> np.ndarray:
     b = np.cross(q_vec, v, axis=-1) * q_w[:, None] * 2.0
     c = q_vec * (np.sum(q_vec * v, axis=-1)[:, None]) * 2.0
     return a + b + c
+
+
+def _sample_random_quat_wxyz(rng: np.random.Generator) -> np.ndarray:
+    u1, u2, u3 = rng.random(3)
+    sqrt_u1 = np.sqrt(u1)
+    sqrt_one_minus_u1 = np.sqrt(1.0 - u1)
+    return np.array(
+        [
+            sqrt_one_minus_u1 * np.sin(2.0 * np.pi * u2),
+            sqrt_one_minus_u1 * np.cos(2.0 * np.pi * u2),
+            sqrt_u1 * np.sin(2.0 * np.pi * u3),
+            sqrt_u1 * np.cos(2.0 * np.pi * u3),
+        ],
+        dtype=np.float64,
+    )[[3, 0, 1, 2]]
 
 
 def _unscale(x: np.ndarray, lower: np.ndarray, upper: np.ndarray) -> np.ndarray:
@@ -351,6 +373,13 @@ class MujocoEnvNoRos:
         obs_list: list[str],
         visualize_keypoints: bool,
         visualize_grasp_bounding_box: bool,
+        randomize_goal: bool,
+        target_volume_mins: tuple[float, float, float],
+        target_volume_maxs: tuple[float, float, float],
+        randomize_goal_rotation: bool,
+        reset_when_dropped: bool,
+        drop_reset_height: float | None,
+        seed: int | None,
     ):
         self.sim = sim
         self.object_scales = object_scales
@@ -362,10 +391,49 @@ class MujocoEnvNoRos:
         self.obs_list = obs_list
         self.visualize_keypoints = visualize_keypoints
         self.visualize_grasp_bounding_box = visualize_grasp_bounding_box
+        self.randomize_goal = randomize_goal
+        self.target_volume_mins = np.array(target_volume_mins, dtype=np.float64)
+        self.target_volume_maxs = np.array(target_volume_maxs, dtype=np.float64)
+        self.randomize_goal_rotation = randomize_goal_rotation
+        self.reset_when_dropped = reset_when_dropped
+        self.rng = np.random.default_rng(seed)
+        self.object_init_z = float(sim.config.object_start_pos[2])
+        self.drop_reset_height = self.object_init_z if drop_reset_height is None else float(drop_reset_height)
+        self.max_object_z_since_reset = self.object_init_z
+        self.lifted_object = False
 
     @property
     def sim_steps_per_control_step(self) -> int:
         return max(1, int(round(self.control_dt / self.sim.config.sim_dt)))
+
+    def reset(self) -> None:
+        goal_pos = self.sim.config.goal_object_start_pos
+        goal_quat = self.sim.config.goal_object_start_quat_wxyz
+        if self.randomize_goal:
+            goal_pos = self.rng.uniform(self.target_volume_mins, self.target_volume_maxs)
+            if self.randomize_goal_rotation:
+                goal_quat = _sample_random_quat_wxyz(self.rng)
+            print(
+                "[MuJoCo] New randomized goal: "
+                f"pos={np.round(goal_pos, 4).tolist()} quat_wxyz={np.round(goal_quat, 4).tolist()}",
+                flush=True,
+            )
+        self.sim.reset_scene(goal_object_pos=goal_pos, goal_object_quat_wxyz=goal_quat)
+        self.object_init_z = float(self.sim.config.object_start_pos[2])
+        self.drop_reset_height = self.object_init_z if self.drop_reset_height is None else self.drop_reset_height
+        self.max_object_z_since_reset = self.object_init_z
+        self.lifted_object = False
+
+    def should_reset_after_drop(self) -> bool:
+        if not self.reset_when_dropped:
+            return False
+        object_z = float(self.sim.get_sim_state()["object_pos"][2])
+        self.max_object_z_since_reset = max(self.max_object_z_since_reset, object_z)
+        armed_by_lift = self.max_object_z_since_reset > self.object_init_z + DROP_RESET_ARMING_LIFT
+        dropped_after_lift = armed_by_lift and object_z < self.drop_reset_height
+        fell_below_table = object_z < TABLE_TOP_Z - TABLE_FALL_RESET_MARGIN
+        self.lifted_object = self.lifted_object or armed_by_lift
+        return dropped_after_lift or fell_below_table
 
     def compute_observation(self) -> torch.Tensor:
         sim_state = self.sim.get_sim_state()
@@ -445,6 +513,14 @@ class MujocoEnvNoRosArgs:
     sim_hz: float = 600.0
     control_hz: float = 60.0
     show_robot_collision_overlay: bool = True
+    use_proxy_object_collision: bool = True
+    randomize_goal: bool = False
+    target_volume_mins: tuple[float, float, float] = DEFAULT_TARGET_VOLUME_MINS
+    target_volume_maxs: tuple[float, float, float] = DEFAULT_TARGET_VOLUME_MAXS
+    randomize_goal_rotation: bool = True
+    reset_when_dropped: bool = True
+    drop_reset_height: float | None = None
+    seed: int | None = None
     visualize_keypoints: bool = False
     visualize_grasp_bounding_box: bool = False
     press_enter_to_execute: bool = False
@@ -600,6 +676,7 @@ def main() -> None:
             goal_object_start_pos=np.array([0.0, 0.0, 0.78]),
             goal_object_start_quat_wxyz=np.array([1.0, 0.0, 0.0, 0.0]),
             show_robot_collision_overlay=args.show_robot_collision_overlay,
+            use_proxy_object_collision=args.use_proxy_object_collision,
         )
     )
     policy = RlPlayer(
@@ -622,7 +699,16 @@ def main() -> None:
         obs_list=obs_list,
         visualize_keypoints=args.visualize_keypoints,
         visualize_grasp_bounding_box=args.visualize_grasp_bounding_box,
+        randomize_goal=args.randomize_goal,
+        target_volume_mins=args.target_volume_mins,
+        target_volume_maxs=args.target_volume_maxs,
+        randomize_goal_rotation=args.randomize_goal_rotation,
+        reset_when_dropped=args.reset_when_dropped,
+        drop_reset_height=args.drop_reset_height,
+        seed=args.seed,
     )
+    env.reset()
+    policy.reset()
 
     if args.press_enter_to_execute and not _wait_for_enter_to_start(
         sim, args.visualize_keypoints, args.visualize_grasp_bounding_box, object_scales
@@ -648,6 +734,10 @@ def main() -> None:
             obs = env.compute_observation()
             action = policy.get_normalized_action(obs, deterministic_actions=True)
             env.step(action)
+            if env.should_reset_after_drop():
+                print("[MuJoCo] Object dropped after lift; resetting replay scene.", flush=True)
+                env.reset()
+                policy.reset()
             if recorder is not None:
                 recorder.capture_until(sim.mj_data.time)
             elapsed = time.time() - start

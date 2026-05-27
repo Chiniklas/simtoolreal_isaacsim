@@ -178,26 +178,28 @@ It loads the pretrained RL-Games policy and the same browser-demo MuJoCo MJCF
 asset bundle mirrored at
 `simtoolreal_lab/assets/mujoco_wasm/scenes/iiwa_sharpa.xml`. The replay computes
 the 140-value policy observation from MuJoCo state and applies the 29-action
-joint target command through the scene's MJCF actuators. The bundled scene uses
-its built-in hammer object body; `--object-name claw_hammer` selects the matching
-policy object-scale metadata.
+joint target command through the scene's MJCF actuators. For DexToolBench
+objects, `--object-name claw_hammer` visualizes the claw-hammer mesh while using
+a stable proxy collision model.
 
 ```bash
 conda activate simtoolreal
 cd /home/chi-zhang/projects/simtoolreal_isaacsim
 
 python -m simtoolreal_lab.deployment.mujoco.mujoco_env_no_ros \
-  --config-path simtoolreal_lab/pretrained_policy/config.yaml \
-  --checkpoint-path simtoolreal_lab/pretrained_policy/model.pth \
+  --checkpoint-path /home/chi-zhang/projects/simtoolreal_isaacsim/simtoolreal_lab/tasks/simtoolreal_sharpa/logs/0_2026-05-26_17-03-04/best/model.pth \
   --object-name claw_hammer \
-  --press-enter-to-execute \
-  --record-video \
-  --video-path outputs/mujoco_rollout.mp4 \
-  --video-camera side_table
+  --randomize-goal \
+  --reset-when-dropped \
+  --visualize-keypoints \
+  --visualize-grasp-bounding-box \
+  --press-enter-to-execute
 ```
 
 `--press-enter-to-execute` pauses once after the viewer opens so the scene can be
-adjusted before the policy rollout and video recording begin.
+adjusted before the policy rollout begins.
+With `--randomize-goal`, the default MuJoCo replay goal volume is gentle and
+near the tabletop: `[-0.12, -0.05, 0.62]` to `[0.12, 0.12, 0.72]`.
 
 For a headless smoke run:
 
