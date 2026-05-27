@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import math
 import os
 import pathlib
@@ -39,7 +40,11 @@ AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 if args_cli.video:
     args_cli.enable_cameras = True
-TASK_OUTPUT_ROOT = pathlib.Path(__file__).resolve().parent / "tasks" / "simtoolreal_sharpa"
+task_output_dir = "sharpa_nutscrew_pick_place" if args_cli.task in {
+    "sharpa_nutscrew_pick_place",
+    "sharpa_nutscrew_pick_place_pretrain_like",
+} else "simtoolreal_sharpa"
+TASK_OUTPUT_ROOT = pathlib.Path(__file__).resolve().parent / "tasks" / task_output_dir
 if not any(arg.startswith("hydra.run.dir=") for arg in hydra_args):
     hydra_args.append(f"hydra.run.dir={TASK_OUTPUT_ROOT / 'outputs'}/${{now:%Y-%m-%d}}/${{now:%H-%M-%S}}")
 sys.argv = [sys.argv[0]] + hydra_args
@@ -65,17 +70,23 @@ from isaaclab.utils.io import dump_pickle, dump_yaml
 from isaaclab_rl.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
+import simtoolreal_lab.tasks.sharpa_nutscrew_pick_place.gym_setup  # noqa: F401
 import simtoolreal_lab.tasks.simtoolreal_sharpa.gym_setup  # noqa: F401
-from simtoolreal_lab.tasks.simtoolreal_sharpa.simtoolreal_sharpa_env_cfg import apply_object_selection
 
 
-AGENTS_DIR = pathlib.Path(__file__).resolve().parent / "tasks" / "simtoolreal_sharpa" / "agents"
+TASKS_DIR = pathlib.Path(__file__).resolve().parent / "tasks"
+
+
+def _task_agents_dir(task_name: str | None) -> pathlib.Path:
+    if task_name in {"sharpa_nutscrew_pick_place", "sharpa_nutscrew_pick_place_pretrain_like"}:
+        return TASKS_DIR / "sharpa_nutscrew_pick_place" / "agents"
+    return TASKS_DIR / "simtoolreal_sharpa" / "agents"
 
 
 def _load_agent_cfg_override(agent_cfg_path: str) -> dict:
     path = pathlib.Path(agent_cfg_path).expanduser()
     if not path.exists():
-        path = AGENTS_DIR / agent_cfg_path
+        path = _task_agents_dir(args_cli.task) / agent_cfg_path
     if not path.exists():
         raise FileNotFoundError(f"Agent cfg not found: {agent_cfg_path}")
     with path.open() as f:
@@ -84,6 +95,11 @@ def _load_agent_cfg_override(agent_cfg_path: str) -> dict:
         raise ValueError(f"Agent cfg must be a YAML mapping with a top-level 'params' key: {path}")
     print(f"[INFO]: Loading agent cfg from: {path}")
     return loaded_cfg
+
+
+def _apply_object_selection(env_cfg) -> None:
+    cfg_module = importlib.import_module(env_cfg.__class__.__module__)
+    cfg_module.apply_object_selection(env_cfg)
 
 
 def _set_cfg_value(cfg, key_path: str, value):
@@ -197,7 +213,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     if args_cli.visualize_grasp_bounding_box:
         env_cfg.debug_grasp_bounding_box = True
-    apply_object_selection(env_cfg)
+    _apply_object_selection(env_cfg)
     agent_cfg["params"]["seed"] = args_cli.seed if args_cli.seed is not None else agent_cfg["params"]["seed"]
     agent_cfg["params"]["config"]["max_epochs"] = (
         args_cli.max_iterations if args_cli.max_iterations is not None else agent_cfg["params"]["config"]["max_epochs"]

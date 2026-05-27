@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import math
 import pickle
 import pathlib
@@ -16,7 +17,7 @@ parser.add_argument("--disable_fabric", action="store_true", default=False, help
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments.")
 parser.add_argument("--task", type=str, default="simtoolreal_sharpa", help="Gym task id.")
 parser.add_argument("--checkpoint", type=str, required=True, help="Path to checkpoint.")
-parser.add_argument("--object", type=str, default=None, help="DexToolBench object name to replay with.")
+parser.add_argument("--object", type=str, default=None, help="Object or asset name to replay with.")
 parser.add_argument("--debug_keypoints", action="store_true", default=False, help="Visualize object and goal keypoints.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -40,8 +41,8 @@ from isaaclab.utils.assets import retrieve_file_path
 from isaaclab_tasks.utils import load_cfg_from_registry, parse_env_cfg
 from isaaclab_rl.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper
 
+import simtoolreal_lab.tasks.sharpa_nutscrew_pick_place.gym_setup  # noqa: F401
 import simtoolreal_lab.tasks.simtoolreal_sharpa.gym_setup  # noqa: F401
-from simtoolreal_lab.tasks.simtoolreal_sharpa.simtoolreal_sharpa_env_cfg import apply_object_selection
 
 
 class SimToolRealRlGamesVecEnvWrapper(RlGamesVecEnvWrapper):
@@ -64,6 +65,11 @@ class SimToolRealRlGamesGpuEnv(RlGamesGpuEnv):
     def set_env_state(self, env_state):
         if hasattr(self.env, "set_env_state"):
             self.env.set_env_state(env_state)
+
+
+def _apply_object_selection(env_cfg) -> None:
+    cfg_module = importlib.import_module(env_cfg.__class__.__module__)
+    cfg_module.apply_object_selection(env_cfg)
 
 
 def _checkpoint_params_dir(checkpoint_path: str | pathlib.Path) -> pathlib.Path | None:
@@ -159,7 +165,7 @@ def main():
     if args_cli.object is not None:
         env_cfg.object_name = args_cli.object
     env_cfg.debug_keypoints = args_cli.debug_keypoints
-    apply_object_selection(env_cfg)
+    _apply_object_selection(env_cfg)
     agent_cfg = _load_replay_agent_cfg(args_cli.task, resume_path)
     agent_cfg["params"]["load_checkpoint"] = True
     agent_cfg["params"]["load_path"] = resume_path
