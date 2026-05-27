@@ -270,8 +270,8 @@ def cylinder(radius: float, height: float, segments: int, z_min: float = 0.0) ->
     for i in range(segments):
         j = (i + 1) % segments
         faces.append([bottom[i], bottom[j], top[j], top[i]])
-        faces.append([bottom_center, bottom[i], bottom[j]])
-        faces.append([top_center, top[j], top[i]])
+        faces.append([bottom_center, bottom[j], bottom[i]])
+        faces.append([top_center, top[i], top[j]])
     return vertices, faces
 
 
@@ -314,8 +314,8 @@ def helical_threaded_shaft(
     top_center = add_vertex(vertices, 0.0, 0.0, z_min + length)
     for i in range(segments):
         j = (i + 1) % segments
-        faces.append([bottom_center, rings[0][i], rings[0][j]])
-        faces.append([top_center, rings[-1][j], rings[-1][i]])
+        faces.append([bottom_center, rings[0][j], rings[0][i]])
+        faces.append([top_center, rings[-1][i], rings[-1][j]])
     return vertices, faces
 
 
@@ -429,8 +429,8 @@ def oval_wing(width: float, depth: float, height: float, x_center: float, segmen
     for i in range(segments):
         j = (i + 1) % segments
         faces.append([bottom[i], bottom[j], top[j], top[i]])
-        faces.append([bc, bottom[i], bottom[j]])
-        faces.append([tc, top[j], top[i]])
+        faces.append([bc, bottom[j], bottom[i]])
+        faces.append([tc, top[i], top[j]])
     return vertices, faces
 
 

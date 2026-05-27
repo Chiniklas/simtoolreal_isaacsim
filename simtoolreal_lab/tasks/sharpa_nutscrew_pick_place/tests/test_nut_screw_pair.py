@@ -1,21 +1,43 @@
-"""Simulate a nut and screw pair on a table in Isaac Sim.
+"""Visualize a nut and screw pair with an analytical 2-DOF thread constraint.
+
+This mirrors the MuJoCo nut-screw test:
+  - the screw is fixed on a table with its thread along +Z,
+  - the nut is gravity-free and kinematically driven,
+  - nut spin and axial slide are coupled by the metric pitch:
+        slide = -pitch / (2*pi) * spin
+
+The detailed USD meshes are used as visuals by default. Enable mesh collision only
+when you explicitly want to debug contacts; threaded mesh contact is usually slow
+and noisy, while the analytical relation is the intended screw/nut motion model.
 
 Example:
     python simtoolreal_lab/tasks/sharpa_nutscrew_pick_place/tests/test_nut_screw_pair.py
     python simtoolreal_lab/tasks/sharpa_nutscrew_pick_place/tests/test_nut_screw_pair.py --family M12 --screw M12X30 --nut M12_nut
     python simtoolreal_lab/tasks/sharpa_nutscrew_pick_place/tests/test_nut_screw_pair.py --asset-root simtoolreal_lab/assets/nutscrew_generated
+    python simtoolreal_lab/tasks/sharpa_nutscrew_pick_place/tests/test_nut_screw_pair.py --family M12 --screw M12X30 --nut M12_nut --spin-velocity 6.0
 """
 
 from __future__ import annotations
 
 import argparse
+import math
 import traceback
 from pathlib import Path
 
 from isaaclab.app import AppLauncher
 
 
-parser = argparse.ArgumentParser(description="Spawn a fixed screw and dynamic concentric nut on a table.")
+FAMILY_PITCHES_M = {
+    "M6": 0.001,
+    "M8": 0.00125,
+    "M10": 0.0015,
+    "M12": 0.00175,
+    "M16": 0.002,
+    "M20": 0.0025,
+}
+
+
+parser = argparse.ArgumentParser(description="Spawn a fixed screw and an analytically constrained concentric nut.")
 parser.add_argument("--family", default="M6", help="Asset family to use for default names, for example M6, M10, or M12.")
 parser.add_argument("--screw", default=None, help="Screw asset stem, for example M6X20, M10X25, or M12X30.")
 parser.add_argument("--nut", default=None, help="Nut asset stem, for example M6_nut, M10_nut, or M12_nut.")
@@ -33,9 +55,20 @@ parser.add_argument(
     default=None,
     help="Nut center height above the screw/head interface. Default places the nut bottom near the screw thread tip.",
 )
-parser.add_argument("--nut-tip-offset", type=float, default=-0.003, help="Distance below the screw tip for the initial nut bottom. Negative starts above the tip.")
-parser.add_argument("--nut-spin", type=float, default=25.0, help="Initial nut angular velocity around +Z in rad/s.")
+parser.add_argument(
+    "--nut-tip-offset",
+    type=float,
+    default=-0.004,
+    help="Initial nut-bottom offset from the screw tip. Negative starts above the tip.",
+)
+parser.add_argument("--spin-velocity", type=float, default=6.0, help="Commanded nut angular velocity around +Z in rad/s.")
+parser.add_argument("--nut-spin", type=float, default=None, help="Alias for --spin-velocity, kept for older commands.")
 parser.add_argument("--nut-mass", type=float, default=0.03, help="Nut mass in kg.")
+parser.add_argument(
+    "--enable-collision",
+    action="store_true",
+    help="Enable SDF mesh collision on the nut and screw for contact debugging.",
+)
 parser.add_argument("--sdf-resolution", type=int, default=256, help="SDF collision resolution for threaded meshes.")
 parser.add_argument("--table-height", type=float, default=0.3, help="Table thickness/height in meters.")
 parser.add_argument("--table-top-z", type=float, default=0.53, help="Table top z position, matching the training env by default.")
@@ -43,6 +76,18 @@ parser.add_argument("--no-pause", action="store_true", help="Start simulation im
 parser.add_argument("--steps", type=int, default=0, help="Number of sim steps to run. Use 0 to run until the viewer closes.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+
+
+def _family_pitch_m(family: str) -> float:
+    family_key = family.upper()
+    if family_key not in FAMILY_PITCHES_M:
+        supported = ", ".join(sorted(FAMILY_PITCHES_M))
+        raise ValueError(f"Unsupported metric family '{family}'. Supported families: {supported}")
+    return FAMILY_PITCHES_M[family_key]
+
+
+def _thread_slope(family: str) -> float:
+    return -_family_pitch_m(family) / (2.0 * math.pi)
 
 
 def _asset_path(asset_name: str, asset_root: Path | None = None) -> Path:
@@ -58,6 +103,7 @@ def _asset_path(asset_name: str, asset_root: Path | None = None) -> Path:
 
 SCREW_NAME = args_cli.screw or f"{args_cli.family}X20"
 NUT_NAME = args_cli.nut or f"{args_cli.family}_nut"
+ASSET_FAMILY = SCREW_NAME.split("_", 1)[0].split("X", 1)[0]
 SCREW_PATH = _asset_path(SCREW_NAME)
 NUT_PATH = _asset_path(NUT_NAME)
 
@@ -80,6 +126,13 @@ def _spawn_usd(prim_path: str, usd_path: Path, pos: tuple[float, float, float]) 
 def _set_translate(prim_path: str, pos: tuple[float, float, float]) -> None:
     prim = sim_utils.get_current_stage().GetPrimAtPath(prim_path)
     UsdGeom.XformCommonAPI(prim).SetTranslate(pos)
+
+
+def _set_thread_pose(prim_path: str, pos: tuple[float, float, float], spin_angle: float) -> None:
+    prim = sim_utils.get_current_stage().GetPrimAtPath(prim_path)
+    xform_api = UsdGeom.XformCommonAPI(prim)
+    xform_api.SetTranslate(pos)
+    xform_api.SetRotate((0.0, 0.0, math.degrees(spin_angle)), UsdGeom.XformCommonAPI.RotationOrderXYZ)
 
 
 def _world_bounds(prim_path: str):
@@ -126,18 +179,15 @@ def _apply_fixed_body(prim_path: str) -> None:
     PhysxSchema.PhysxRigidBodyAPI.Apply(prim)
 
 
-def _apply_dynamic_body(prim_path: str, mass: float, angular_velocity_z: float) -> None:
+def _apply_kinematic_body(prim_path: str, mass: float) -> None:
     prim = sim_utils.get_current_stage().GetPrimAtPath(prim_path)
     rigid_body = UsdPhysics.RigidBodyAPI.Apply(prim)
     rigid_body.CreateRigidBodyEnabledAttr(True)
-    rigid_body.CreateKinematicEnabledAttr(False)
-    rigid_body.CreateAngularVelocityAttr().Set((0.0, 0.0, angular_velocity_z))
+    rigid_body.CreateKinematicEnabledAttr(True)
     mass_api = UsdPhysics.MassAPI.Apply(prim)
     mass_api.CreateMassAttr(mass)
     physx_body = PhysxSchema.PhysxRigidBodyAPI.Apply(prim)
-    physx_body.CreateDisableGravityAttr(False)
-    physx_body.CreateSolverPositionIterationCountAttr(16)
-    physx_body.CreateSolverVelocityIterationCountAttr(4)
+    physx_body.CreateDisableGravityAttr(True)
 
 
 def _print_bounds(label: str, prim_path: str) -> None:
@@ -150,6 +200,9 @@ def main() -> None:
     sim_cfg = sim_utils.SimulationCfg(dt=1.0 / 120.0, render_interval=1)
     sim = sim_utils.SimulationContext(sim_cfg)
     sim.set_camera_view(eye=(0.32, -0.42, args_cli.table_top_z + 0.16), target=(0.0, 0.0, args_cli.table_top_z + 0.035))
+    spin_velocity = args_cli.nut_spin if args_cli.nut_spin is not None else args_cli.spin_velocity
+    thread_pitch = _family_pitch_m(ASSET_FAMILY)
+    thread_slope = _thread_slope(ASSET_FAMILY)
 
     spawn_ground_plane("/World/ground", GroundPlaneCfg())
     table_center_z = args_cli.table_top_z - 0.5 * args_cli.table_height
@@ -173,34 +226,53 @@ def main() -> None:
         nut_min, nut_max = _world_bounds("/World/nut")
         nut_half_height = 0.5 * (nut_max[2] - nut_min[2])
         nut_start_height = max(0.0, screw_max[2] - screw_origin_z - args_cli.nut_tip_offset + nut_half_height)
+    else:
+        nut_min, nut_max = _world_bounds("/World/nut")
+        nut_half_height = 0.5 * (nut_max[2] - nut_min[2])
     nut_start_z = screw_origin_z + nut_start_height
-    _set_translate("/World/nut", (0.0, 0.0, nut_start_z))
+    _set_thread_pose("/World/nut", (0.0, 0.0, nut_start_z), 0.0)
 
-    _apply_collision("/World/screw", approximation="sdf")
-    _apply_collision("/World/nut", approximation="sdf")
+    if args_cli.enable_collision:
+        _apply_collision("/World/screw", approximation="sdf")
+        _apply_collision("/World/nut", approximation="sdf")
     _apply_fixed_body("/World/screw")
-    _apply_dynamic_body("/World/nut", args_cli.nut_mass, 0.0)
+    _apply_kinematic_body("/World/nut", args_cli.nut_mass)
 
     sim.reset()
+    _set_thread_pose("/World/nut", (0.0, 0.0, nut_start_z), 0.0)
     sim.step()
+
+    thread_base_z = screw_origin_z
+    max_down_slide = max(0.0, nut_start_z - (thread_base_z + nut_half_height))
+    turns_to_base = max_down_slide / thread_pitch if thread_pitch > 0.0 else 0.0
 
     print(f"[INFO] Spawned screw: {SCREW_PATH}")
     print(f"[INFO] Spawned nut:   {NUT_PATH}")
     print(f"[INFO] Screw fixed on table, thread along +Z. Screw top z: {screw_max[2]:.4f} m")
-    print(f"[INFO] Nut starts concentric with its bottom near the thread tip at z={nut_start_z:.4f} m with spin={args_cli.nut_spin:.2f} rad/s")
+    print(f"[INFO] Nut is gravity-free and kinematic with 2DOF thread coupling.")
+    print(f"[INFO] Thread pitch: {thread_pitch * 1000.0:.3f} mm/rev, slide/spin slope: {thread_slope:.8f} m/rad")
+    print(
+        f"[INFO] Nut starts concentric with its bottom near the thread tip at z={nut_start_z:.4f} m "
+        f"and commanded spin={spin_velocity:.2f} rad/s"
+    )
+    print(f"[INFO] Downward travel to thread base: {max_down_slide:.4f} m ({turns_to_base:.2f} turns)")
     _print_bounds("Screw", "/World/screw")
     _print_bounds("Nut", "/World/nut")
     print("[INFO] Close the Isaac Sim window to stop, or pass --steps N for a finite run.")
     if not args_cli.no_pause:
-        input("[INFO] Press Enter to start gravity/spin simulation...")
-    UsdPhysics.RigidBodyAPI(sim_utils.get_current_stage().GetPrimAtPath("/World/nut")).CreateAngularVelocityAttr().Set(
-        (0.0, 0.0, args_cli.nut_spin)
-    )
+        input("[INFO] Press Enter to start analytical spin/slide simulation...")
 
     step_count = 0
     max_steps = args_cli.steps if args_cli.steps > 0 else None
+    spin_angle = 0.0
     print(f"[INFO] Viewer running: {simulation_app.is_running()}")
     while simulation_app.is_running():
+        spin_angle += spin_velocity * sim_cfg.dt
+        slide = thread_slope * spin_angle
+        if max_down_slide > 0.0 and slide < -max_down_slide:
+            slide = -max_down_slide
+            spin_angle = slide / thread_slope
+        _set_thread_pose("/World/nut", (0.0, 0.0, nut_start_z + slide), spin_angle)
         sim.step()
         step_count += 1
         if max_steps is not None and step_count >= max_steps:
