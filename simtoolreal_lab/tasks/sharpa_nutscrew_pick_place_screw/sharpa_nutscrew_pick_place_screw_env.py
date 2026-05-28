@@ -1,4 +1,4 @@
-"""Isaac Lab DirectRLEnv port of the reference SHARPA nut-screw pick-place task."""
+"""Isaac Lab DirectRLEnv port of the SHARPA nut-screw pick-place-screw task."""
 
 from __future__ import annotations
 
@@ -16,24 +16,24 @@ from isaaclab.sensors import ContactSensor
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.math import quat_apply, quat_from_angle_axis, quat_mul, sample_uniform, saturate
 
-from .sharpa_nutscrew_pick_place_env_cfg import NUTSCREW_OBJECT_SCALES, SharpaNutscrewPickPlaceEnvCfg
-from .sharpa_nutscrew_pick_place_utils import compute_joint_pos_targets, unscale
+from .sharpa_nutscrew_pick_place_screw_env_cfg import NUTSCREW_OBJECT_SCALES, SharpaNutscrewPickPlaceScrewEnvCfg
+from .sharpa_nutscrew_pick_place_screw_utils import compute_joint_pos_targets, unscale
 
 
 def quat_wxyz_to_xyzw(q: torch.Tensor) -> torch.Tensor:
     return torch.cat((q[..., 1:], q[..., 0:1]), dim=-1)
 
 
-class SharpaNutscrewPickPlaceEnv(DirectRLEnv):
-    """First Isaac Lab implementation pass for the SHARPA nut-screw pick-place task.
+class SharpaNutscrewPickPlaceScrewEnv(DirectRLEnv):
+    """Isaac Lab implementation for the SHARPA nut-screw pick-place-screw task.
 
     This keeps the reference action count and 140-value observation layout while
     using Isaac Lab-native articulation/rigid-object state access.
     """
 
-    cfg: SharpaNutscrewPickPlaceEnvCfg
+    cfg: SharpaNutscrewPickPlaceScrewEnvCfg
 
-    def __init__(self, cfg: SharpaNutscrewPickPlaceEnvCfg, render_mode: str | None = None, **kwargs):
+    def __init__(self, cfg: SharpaNutscrewPickPlaceScrewEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
         self._apply_object_mass()
 
@@ -110,10 +110,16 @@ class SharpaNutscrewPickPlaceEnv(DirectRLEnv):
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot_cfg)
         self.table = RigidObject(self.cfg.table_cfg)
-        if self.cfg.object_name == "multi_nutscrew":
+        if getattr(self.cfg, "screwing_phase", False):
+            self.fixed_screw = self._make_root_rigid_usd_object(self.cfg.fixed_screw_cfg)
+            self.object = self._make_root_rigid_usd_object(self.cfg.object_cfg)
+            self.goal_object = self._make_root_rigid_usd_object(self.cfg.goal_object_cfg)
+        elif self.cfg.object_name == "multi_nutscrew":
+            self.fixed_screw = None
             self.object = self._make_multi_usd_object(self.cfg.object_cfg)
             self.goal_object = self._make_multi_usd_object(self.cfg.goal_object_cfg)
         else:
+            self.fixed_screw = None
             self.object = RigidObject(self.cfg.object_cfg)
             self.goal_object = RigidObject(self.cfg.goal_object_cfg)
         self.table_contact_sensor = None
@@ -127,12 +133,46 @@ class SharpaNutscrewPickPlaceEnv(DirectRLEnv):
         self._disable_goal_object_collisions()
         self.scene.articulations["robot"] = self.robot
         self.scene.rigid_objects["table"] = self.table
+        if self.fixed_screw is not None:
+            self.scene.rigid_objects["fixed_screw"] = self.fixed_screw
         self.scene.rigid_objects["object"] = self.object
         self.scene.rigid_objects["goal_object"] = self.goal_object
         if self.table_contact_sensor is not None:
             self.scene.sensors["table_contact_sensor"] = self.table_contact_sensor
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
+
+    def _make_root_rigid_usd_object(self, cfg) -> RigidObject:
+        spawn_cfg = cfg.spawn.replace(rigid_props=None, collision_props=None, mass_props=None)
+        spawn_cfg.func(
+            cfg.prim_path,
+            spawn_cfg,
+            translation=cfg.init_state.pos,
+            orientation=cfg.init_state.rot,
+        )
+        self._ensure_root_rigid_body(cfg.prim_path, cfg)
+        return RigidObject(cfg.replace(spawn=None))
+
+    def _ensure_root_rigid_body(self, prim_path: str, cfg) -> None:
+        for prim in sim_utils.find_matching_prims(prim_path):
+            if not prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                UsdPhysics.RigidBodyAPI.Apply(prim)
+            rigid_body_api = UsdPhysics.RigidBodyAPI(prim)
+            rigid_body_api.CreateRigidBodyEnabledAttr(True)
+
+            physx_api = PhysxSchema.PhysxRigidBodyAPI(prim)
+            if not physx_api:
+                physx_api = PhysxSchema.PhysxRigidBodyAPI.Apply(prim)
+            rigid_props = getattr(cfg.spawn, "rigid_props", None)
+            physx_api.CreateDisableGravityAttr(bool(getattr(rigid_props, "disable_gravity", False)))
+            rigid_body_api.CreateKinematicEnabledAttr(bool(getattr(rigid_props, "kinematic_enabled", False)))
+
+            mass_api = UsdPhysics.MassAPI(prim)
+            if not mass_api:
+                mass_api = UsdPhysics.MassAPI.Apply(prim)
+            mass_props = getattr(cfg.spawn, "mass_props", None)
+            if mass_props is not None and getattr(mass_props, "mass", None) is not None:
+                mass_api.CreateMassAttr(float(mass_props.mass))
 
     def _make_multi_usd_object(self, cfg) -> RigidObject:
         cfg.spawn.func(
@@ -402,6 +442,16 @@ class SharpaNutscrewPickPlaceEnv(DirectRLEnv):
         table_state[:, 2] = table_reset_z + self.scene.env_origins[env_ids, 2]
         table_state[:, 7:13] = 0.0
         self.table.write_root_state_to_sim(table_state, env_ids)
+
+        if self.fixed_screw is not None:
+            screw_state = self.fixed_screw.data.default_root_state[env_ids].clone()
+            screw_init_pos = torch.tensor(self.cfg.fixed_screw_cfg.init_state.pos, device=self.device, dtype=screw_state.dtype)
+            screw_state[:, 0:3] = screw_init_pos + self.scene.env_origins[env_ids]
+            screw_state[:, 3:7] = torch.tensor(
+                self.cfg.fixed_screw_cfg.init_state.rot, device=self.device, dtype=screw_state.dtype
+            )
+            screw_state[:, 7:13] = 0.0
+            self.fixed_screw.write_root_state_to_sim(screw_state, env_ids)
 
         object_state = self.object.data.default_root_state[env_ids].clone()
         xy_noise = torch.stack(

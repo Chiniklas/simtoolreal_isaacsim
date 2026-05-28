@@ -203,7 +203,7 @@ params:
 
 wandb_activate: False
 wandb_group: 'rl_gpu'
-wandb_name: 'sharpa_nutscrew_pick_place_pretrain_like'
+wandb_name: 'sharpa_nutscrew_pick_place_screw_pretrain_like'
 wandb_entity: ''
 wandb_project: 'simtoolreal'
 wandb_tags: []

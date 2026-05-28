@@ -10,7 +10,7 @@ setup(
     include_package_data=True,
     package_data={
         "simtoolreal_lab.tasks.simtoolreal_sharpa.agents": ["*.yaml"],
-        "simtoolreal_lab.tasks.sharpa_nutscrew_pick_place.agents": ["*.yaml"],
+        "simtoolreal_lab.tasks.sharpa_nutscrew_pick_place_screw.agents": ["*.yaml"],
     },
     install_requires=[],
 )

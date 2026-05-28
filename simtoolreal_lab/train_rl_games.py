@@ -40,9 +40,9 @@ AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 if args_cli.video:
     args_cli.enable_cameras = True
-task_output_dir = "sharpa_nutscrew_pick_place" if args_cli.task in {
-    "sharpa_nutscrew_pick_place",
-    "sharpa_nutscrew_pick_place_pretrain_like",
+task_output_dir = "sharpa_nutscrew_pick_place_screw" if args_cli.task in {
+    "sharpa_nutscrew_pick_place_screw",
+    "sharpa_nutscrew_pick_place_screw_pretrain_like",
 } else "simtoolreal_sharpa"
 TASK_OUTPUT_ROOT = pathlib.Path(__file__).resolve().parent / "tasks" / task_output_dir
 if not any(arg.startswith("hydra.run.dir=") for arg in hydra_args):
@@ -70,7 +70,7 @@ from isaaclab.utils.io import dump_pickle, dump_yaml
 from isaaclab_rl.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
-import simtoolreal_lab.tasks.sharpa_nutscrew_pick_place.gym_setup  # noqa: F401
+import simtoolreal_lab.tasks.sharpa_nutscrew_pick_place_screw.gym_setup  # noqa: F401
 import simtoolreal_lab.tasks.simtoolreal_sharpa.gym_setup  # noqa: F401
 
 
@@ -78,8 +78,8 @@ TASKS_DIR = pathlib.Path(__file__).resolve().parent / "tasks"
 
 
 def _task_agents_dir(task_name: str | None) -> pathlib.Path:
-    if task_name in {"sharpa_nutscrew_pick_place", "sharpa_nutscrew_pick_place_pretrain_like"}:
-        return TASKS_DIR / "sharpa_nutscrew_pick_place" / "agents"
+    if task_name in {"sharpa_nutscrew_pick_place_screw", "sharpa_nutscrew_pick_place_screw_pretrain_like"}:
+        return TASKS_DIR / "sharpa_nutscrew_pick_place_screw" / "agents"
     return TASKS_DIR / "simtoolreal_sharpa" / "agents"
 
 

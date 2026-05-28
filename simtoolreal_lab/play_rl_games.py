@@ -41,7 +41,7 @@ from isaaclab.utils.assets import retrieve_file_path
 from isaaclab_tasks.utils import load_cfg_from_registry, parse_env_cfg
 from isaaclab_rl.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper
 
-import simtoolreal_lab.tasks.sharpa_nutscrew_pick_place.gym_setup  # noqa: F401
+import simtoolreal_lab.tasks.sharpa_nutscrew_pick_place_screw.gym_setup  # noqa: F401
 import simtoolreal_lab.tasks.simtoolreal_sharpa.gym_setup  # noqa: F401
 
 

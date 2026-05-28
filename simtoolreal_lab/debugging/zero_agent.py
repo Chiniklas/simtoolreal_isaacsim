@@ -8,6 +8,7 @@ and the post-CLI apply_object_selection call (so --object overrides actually lan
 from __future__ import annotations
 
 import argparse
+import importlib
 
 from isaaclab.app import AppLauncher
 
@@ -30,8 +31,13 @@ import torch
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import parse_env_cfg
 
+import simtoolreal_lab.tasks.sharpa_nutscrew_pick_place_screw.gym_setup  # noqa: F401
 import simtoolreal_lab.tasks.simtoolreal_sharpa.gym_setup  # noqa: F401
-from simtoolreal_lab.tasks.simtoolreal_sharpa.simtoolreal_sharpa_env_cfg import apply_object_selection
+
+
+def apply_object_selection(env_cfg) -> None:
+    cfg_module = importlib.import_module(env_cfg.__class__.__module__)
+    cfg_module.apply_object_selection(env_cfg)
 
 
 def main():

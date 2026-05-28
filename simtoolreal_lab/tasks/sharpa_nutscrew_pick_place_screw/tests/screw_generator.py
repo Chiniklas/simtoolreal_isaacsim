@@ -62,25 +62,25 @@ Generate the full default library:
 
 .. code-block:: bash
 
-    python simtoolreal_lab/tasks/sharpa_nutscrew_pick_place/tests/screw_generator.py --overwrite
+    python simtoolreal_lab/tasks/sharpa_nutscrew_pick_place_screw/tests/screw_generator.py --overwrite
 
 Generate only M6:
 
 .. code-block:: bash
 
-    python simtoolreal_lab/tasks/sharpa_nutscrew_pick_place/tests/screw_generator.py --families M6 --overwrite
+    python simtoolreal_lab/tasks/sharpa_nutscrew_pick_place_screw/tests/screw_generator.py --families M6 --overwrite
 
 Generate lower-detail assets for faster loading:
 
 .. code-block:: bash
 
-    python simtoolreal_lab/tasks/sharpa_nutscrew_pick_place/tests/screw_generator.py --segments 24 --thread-steps-per-turn 5 --overwrite
+    python simtoolreal_lab/tasks/sharpa_nutscrew_pick_place_screw/tests/screw_generator.py --segments 24 --thread-steps-per-turn 5 --overwrite
 
 Generate USD, OBJ, and STL assets for MuJoCo sim2sim checks:
 
 .. code-block:: bash
 
-    python simtoolreal_lab/tasks/sharpa_nutscrew_pick_place/tests/screw_generator.py \\
+    python simtoolreal_lab/tasks/sharpa_nutscrew_pick_place_screw/tests/screw_generator.py \\
       --families M8 M10 M12 M16 M20 \\
       --formats usd obj stl \\
       --overwrite
@@ -89,7 +89,7 @@ Visualize the generated assets:
 
 .. code-block:: bash
 
-    python simtoolreal_lab/tasks/sharpa_nutscrew_pick_place/tests/test_nut_screw_pair.py \\
+    python simtoolreal_lab/tasks/sharpa_nutscrew_pick_place_screw/tests/test_nut_screw_pair.py \\
       --asset-root simtoolreal_lab/assets/nutscrew_generated \\
       --family M6 --screw M6X20 --nut M6_nut
 

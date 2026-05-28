@@ -204,7 +204,7 @@ params:
 
 wandb_activate: False
 wandb_group: 'rl_gpu'
-wandb_name: 'sharpa_nutscrew_pick_place'
+wandb_name: 'sharpa_nutscrew_pick_place_screw'
 wandb_entity: ''
 wandb_project: 'simtoolreal'
 wandb_tags: []

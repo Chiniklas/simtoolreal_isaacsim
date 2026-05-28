@@ -1,4 +1,4 @@
-"""Observation/action helpers for the SHARPA nut-screw pick-place task."""
+"""Observation/action helpers for the SHARPA nut-screw pick-place-screw task."""
 
 from __future__ import annotations
 

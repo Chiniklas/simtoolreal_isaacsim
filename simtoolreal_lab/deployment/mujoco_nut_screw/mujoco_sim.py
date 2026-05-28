@@ -60,7 +60,7 @@ def _asset_path(asset_root: Path, family: str, name: str, suffix: str = ".obj") 
         raise FileNotFoundError(
             f"Missing nut-screw mesh: {path}\n"
             "Generate OBJ assets with:\n"
-            "  python simtoolreal_lab/tasks/sharpa_nutscrew_pick_place/tests/screw_generator.py "
+            "  python simtoolreal_lab/tasks/sharpa_nutscrew_pick_place_screw/tests/screw_generator.py "
             "--families M8 M10 M12 M16 M20 --formats usd obj stl --overwrite"
         )
     return path
