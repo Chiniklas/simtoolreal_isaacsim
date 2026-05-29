@@ -27,6 +27,14 @@ parser.add_argument("--sigma", type=str, default=None, help="Initial policy stan
 parser.add_argument("--max_iterations", type=int, default=None, help="Maximum RL-Games epochs.")
 parser.add_argument("--agent_cfg", type=str, default=None, help="Path or agents/ filename for an RL-Games YAML recipe.")
 parser.add_argument(
+    "--visualize_keypoints",
+    "--visualize-keypoints",
+    dest="visualize_keypoints",
+    action="store_true",
+    default=False,
+    help="Draw the four object and goal keypoints in the Isaac viewer.",
+)
+parser.add_argument(
     "--visualize_grasp_bounding_box",
     "--visualize-grasp-bounding-box",
     "--visualize_grasp_bouding_box",
@@ -211,6 +219,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     _apply_cli_config_overrides(env_cfg, agent_cfg)
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    if args_cli.visualize_keypoints:
+        env_cfg.debug_keypoints = True
     if args_cli.visualize_grasp_bounding_box:
         env_cfg.debug_grasp_bounding_box = True
     _apply_object_selection(env_cfg)

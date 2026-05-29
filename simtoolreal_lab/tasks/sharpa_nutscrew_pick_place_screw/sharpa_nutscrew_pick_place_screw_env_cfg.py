@@ -20,13 +20,21 @@ from simtoolreal_lab.assets.kuka_sharpa import KUKA_SHARPA_CFG, KUKA_SHARPA_JOIN
 SIMTOOLREAL_LAB_DIR = Path(__file__).resolve().parents[2]
 NUTSCREW_ASSET_DIRS = (SIMTOOLREAL_LAB_DIR / "assets" / "M6", SIMTOOLREAL_LAB_DIR / "assets" / "M10")
 GENERATED_NUTSCREW_ASSET_DIR = SIMTOOLREAL_LAB_DIR / "assets" / "nutscrew_generated"
-NUTSCREW_TABLE_SIZE = (0.24, 0.20, 0.04)
+NUTSCREW_TABLE_SIZE = (0.475, 0.4, 0.3)
 NUTSCREW_TABLE_TOP_Z = 0.53
 NUTSCREW_TABLE_POS = (
     0.0,
     0.0,
     NUTSCREW_TABLE_TOP_Z - 0.5 * NUTSCREW_TABLE_SIZE[2],
 )
+FAMILY_PITCHES = {
+    "M6": 0.001,
+    "M8": 0.00125,
+    "M10": 0.0015,
+    "M12": 0.00175,
+    "M16": 0.002,
+    "M20": 0.0025,
+}
 
 
 @dataclass(frozen=True)
@@ -41,6 +49,8 @@ class NutScrewSpawnPose:
     nut_pos: tuple[float, float, float]
     screw_top_z: float
     nut_bottom_z: float
+    nut_top_z: float
+    thread_length: float
 
 
 def discover_nutscrew_usd_paths() -> dict[str, Path]:
@@ -92,13 +102,20 @@ def compute_nutscrew_spawn_pose(family: str, screw_name: str, nut_name: str, cle
     nut_bounds = obj_bounds(generated_nutscrew_asset_path(family, nut_name, "obj"))
     screw_origin_z = NUTSCREW_TABLE_TOP_Z - screw_bounds.mins[2]
     screw_top_z = screw_origin_z + screw_bounds.maxs[2]
-    nut_center_z = screw_top_z + clearance - nut_bounds.mins[2]
+    nut_center_z = screw_top_z - clearance - nut_bounds.maxs[2]
     return NutScrewSpawnPose(
         screw_pos=(0.0, 0.0, screw_origin_z),
         nut_pos=(0.0, 0.0, nut_center_z),
         screw_top_z=screw_top_z,
         nut_bottom_z=nut_center_z + nut_bounds.mins[2],
+        nut_top_z=nut_center_z + nut_bounds.maxs[2],
+        thread_length=max(screw_bounds.maxs[2], 0.0),
     )
+
+
+def generated_nut_mesh_size(family: str, nut_name: str) -> tuple[float, float, float]:
+    bounds = obj_bounds(generated_nutscrew_asset_path(family, nut_name, "obj"))
+    return tuple(bounds.maxs[idx] - bounds.mins[idx] for idx in range(3))
 
 
 def _object_rigid_props() -> sim_utils.RigidBodyPropertiesCfg:
@@ -346,21 +363,25 @@ def configure_screwing_phase(cfg: "SharpaNutscrewPickPlaceScrewEnvCfg") -> None:
     cfg.table_cfg.init_state.pos = NUTSCREW_TABLE_POS
     cfg.table_cfg.spawn.size = NUTSCREW_TABLE_SIZE
     cfg.object_start_pose = (*pose.nut_pos, 0.0, 0.0, 0.0, 1.0)
-    cfg.goal_object_pose = (*pose.nut_pos, 0.0, 0.0, 0.0, 1.0)
+    cfg.goal_object_pose = None
     cfg.object_scales = (1.0, 1.0, 1.0)
     cfg.object_scale_noise_multiplier_range = (1.0, 1.0)
+    cfg.debug_grasp_bounding_box_size = generated_nut_mesh_size(cfg.screwing_family, cfg.screwing_nut_name)
+    cfg.debug_keypoint_size = cfg.debug_grasp_bounding_box_size
     cfg.randomize_object_rotation = False
+    cfg.screwing_thread_length = pose.thread_length
     cfg.reset_position_noise_x = 0.0
     cfg.reset_position_noise_y = 0.0
     cfg.reset_position_noise_z = 0.0
     cfg.table_reset_z_range = 0.0
     cfg.object_z_low_reset_threshold = NUTSCREW_TABLE_TOP_Z - 0.05
+    cfg.force_scale = 0.0
 
 
-DEFAULT_SCREWING_FAMILY = "M12"
-DEFAULT_SCREWING_SCREW_NAME = "M12X30"
-DEFAULT_SCREWING_NUT_NAME = "M12_nut"
-DEFAULT_SCREWING_CLEARANCE = 0.002
+DEFAULT_SCREWING_FAMILY = "M20"
+DEFAULT_SCREWING_SCREW_NAME = "M20X30"
+DEFAULT_SCREWING_NUT_NAME = "M20_nut"
+DEFAULT_SCREWING_CLEARANCE = 0.0
 DEFAULT_SCREWING_POSE = compute_nutscrew_spawn_pose(
     DEFAULT_SCREWING_FAMILY,
     DEFAULT_SCREWING_SCREW_NAME,
@@ -404,6 +425,12 @@ class SharpaNutscrewPickPlaceScrewEnvCfg(DirectRLEnvCfg):
     screwing_screw_name = DEFAULT_SCREWING_SCREW_NAME
     screwing_nut_name = DEFAULT_SCREWING_NUT_NAME
     screwing_clearance = DEFAULT_SCREWING_CLEARANCE
+    screwing_thread_length = DEFAULT_SCREWING_POSE.thread_length
+    screwing_goal_angle_range_degrees = (60.0, 90.0)
+    screwing_kinematic_constraint = True
+    screwing_thread_angular_damping = 12.0
+    screwing_thread_static_angular_velocity = 0.04
+    screwing_thread_delta_deadband = 1.0e-4
     object_name = DEFAULT_SCREWING_NUT_NAME
     multi_asset_names = tuple(sorted(NUTSCREW_USD_PATHS))
     robot_cfg = KUKA_SHARPA_CFG.replace(prim_path="/World/envs/env_.*/Robot")
@@ -440,7 +467,30 @@ class SharpaNutscrewPickPlaceScrewEnvCfg(DirectRLEnvCfg):
     table_contact_sensor: ContactSensorCfg = ContactSensorCfg(
         prim_path="/World/envs/env_.*/table",
         debug_vis=False,
-        filter_prim_paths_expr=["/World/envs/env_.*/object"],
+        filter_prim_paths_expr=[
+            "/World/envs/env_.*/Robot/kuka_sharpa/left_thumb_CMC_VL",
+            "/World/envs/env_.*/Robot/kuka_sharpa/left_thumb_MC",
+            "/World/envs/env_.*/Robot/kuka_sharpa/left_thumb_MCP_VL",
+            "/World/envs/env_.*/Robot/kuka_sharpa/left_thumb_PP",
+            "/World/envs/env_.*/Robot/kuka_sharpa/left_thumb_DP",
+            "/World/envs/env_.*/Robot/kuka_sharpa/left_index_MCP_VL",
+            "/World/envs/env_.*/Robot/kuka_sharpa/left_index_PP",
+            "/World/envs/env_.*/Robot/kuka_sharpa/left_index_MP",
+            "/World/envs/env_.*/Robot/kuka_sharpa/left_index_DP",
+            "/World/envs/env_.*/Robot/kuka_sharpa/left_middle_MCP_VL",
+            "/World/envs/env_.*/Robot/kuka_sharpa/left_middle_PP",
+            "/World/envs/env_.*/Robot/kuka_sharpa/left_middle_MP",
+            "/World/envs/env_.*/Robot/kuka_sharpa/left_middle_DP",
+            "/World/envs/env_.*/Robot/kuka_sharpa/left_ring_MCP_VL",
+            "/World/envs/env_.*/Robot/kuka_sharpa/left_ring_PP",
+            "/World/envs/env_.*/Robot/kuka_sharpa/left_ring_MP",
+            "/World/envs/env_.*/Robot/kuka_sharpa/left_ring_DP",
+            "/World/envs/env_.*/Robot/kuka_sharpa/left_pinky_MC",
+            "/World/envs/env_.*/Robot/kuka_sharpa/left_pinky_MCP_VL",
+            "/World/envs/env_.*/Robot/kuka_sharpa/left_pinky_PP",
+            "/World/envs/env_.*/Robot/kuka_sharpa/left_pinky_MP",
+            "/World/envs/env_.*/Robot/kuka_sharpa/left_pinky_DP",
+        ],
     )
     object_mass = 0.05
     object_cfg: RigidObjectCfg = make_generated_nut_object_cfg(DEFAULT_SCREWING_FAMILY, DEFAULT_SCREWING_NUT_NAME, object_mass)
@@ -471,17 +521,19 @@ class SharpaNutscrewPickPlaceScrewEnvCfg(DirectRLEnvCfg):
         0.0,
         1.0,
     )
-    goal_object_pose: tuple[float, float, float, float, float, float, float] | None = (
-        *DEFAULT_SCREWING_POSE.nut_pos,
-        0.0,
-        0.0,
-        0.0,
-        1.0,
-    )
+    goal_object_pose: tuple[float, float, float, float, float, float, float] | None = None
     debug_keypoints = False
     debug_grasp_bounding_box = False
     debug_keypoint_radius = 0.012
+    debug_keypoint_size: tuple[float, float, float] | None = None
+    debug_keypoint_padding = 0.001
+    debug_grasp_bounding_box_size: tuple[float, float, float] | None = None
+    debug_grasp_bounding_box_padding = 0.001
     debug_grasp_bounding_box_line_width = 3.0
+    rotation_indicator_enabled = True
+    rotation_indicator_length = 0.028
+    rotation_indicator_width = 0.001
+    rotation_indicator_z_offset = 0.007
 
     # reference task geometry
     table_top_z = 0.53
@@ -515,8 +567,8 @@ class SharpaNutscrewPickPlaceScrewEnvCfg(DirectRLEnvCfg):
     object_ang_vel_penalty_scale = 0.0
     object_z_low_reset_threshold = NUTSCREW_TABLE_TOP_Z - 0.05
     hand_far_from_object_threshold = 1.5
-    with_table_force_sensor = False
-    table_force_threshold = 100.0
+    with_table_force_sensor = True
+    table_force_threshold = 5.0
     reset_when_dropped = True
     success_tolerance = 0.075
     target_success_tolerance = 0.01
@@ -539,7 +591,7 @@ class SharpaNutscrewPickPlaceScrewEnvCfg(DirectRLEnvCfg):
     joint_velocity_obs_noise_std = 0.01
 
     # object force/torque disturbances
-    force_scale = 2.0
+    force_scale = 0.0
     force_prob_range = (0.001, 0.1)
     force_decay = 0.99
     force_decay_interval = 0.08

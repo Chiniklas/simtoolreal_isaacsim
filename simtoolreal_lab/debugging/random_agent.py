@@ -20,6 +20,22 @@ parser.add_argument("--object", type=str, default=None, help="Optional DexToolBe
 parser.add_argument("--max_steps", type=int, default=None, help="Stop after this many environment steps.")
 parser.add_argument("--log_every", type=int, default=60, help="Print summary every N steps (0 to disable).")
 parser.add_argument("--seed", type=int, default=0, help="RNG seed for the random action sampler.")
+parser.add_argument(
+    "--visualize_keypoints",
+    "--visualize-keypoints",
+    dest="visualize_keypoints",
+    action="store_true",
+    default=False,
+    help="Draw the four object and goal keypoints in the Isaac viewer.",
+)
+parser.add_argument(
+    "--visualize_grasp_bounding_box",
+    "--visualize-grasp-bounding-box",
+    dest="visualize_grasp_bounding_box",
+    action="store_true",
+    default=False,
+    help="Draw the object and goal grasp bounding boxes in the Isaac viewer.",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -50,6 +66,10 @@ def main():
     )
     if args_cli.object is not None:
         env_cfg.object_name = args_cli.object
+    if args_cli.visualize_keypoints:
+        env_cfg.debug_keypoints = True
+    if args_cli.visualize_grasp_bounding_box:
+        env_cfg.debug_grasp_bounding_box = True
     apply_object_selection(env_cfg)
 
     env = gym.make(args_cli.task, cfg=env_cfg)

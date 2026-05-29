@@ -46,3 +46,16 @@ By default the nut uses six invisible box collision proxies so the center hole i
 not filled by a convex mesh collision. The screw uses invisible cylinder proxies
 for the head and shaft. To test different mesh/collision choices, edit the setup
 include or pass a different `--scene-xml-path`.
+
+The standalone meshing test also has simple thread damping/friction matching the
+Isaac task:
+
+```bash
+python simtoolreal_lab/deployment/mujoco_nut_screw/test_nut_screw_meshing.py \
+  --thread-angular-damping 12.0 \
+  --thread-static-angular-velocity 0.04 \
+  --thread-velocity-deadband 1.0e-4
+```
+
+`--spin-velocity` is still an external commanded drive. Use `--spin-velocity 0`
+when checking passive coast-down behavior.

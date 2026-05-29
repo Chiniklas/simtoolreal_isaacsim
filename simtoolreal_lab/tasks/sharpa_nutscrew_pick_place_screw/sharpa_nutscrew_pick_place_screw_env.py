@@ -7,7 +7,7 @@ from collections.abc import Sequence
 import re
 
 import torch
-from pxr import PhysxSchema, UsdPhysics
+from pxr import PhysxSchema, Usd, UsdPhysics
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject
@@ -16,7 +16,7 @@ from isaaclab.sensors import ContactSensor
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.math import quat_apply, quat_from_angle_axis, quat_mul, sample_uniform, saturate
 
-from .sharpa_nutscrew_pick_place_screw_env_cfg import NUTSCREW_OBJECT_SCALES, SharpaNutscrewPickPlaceScrewEnvCfg
+from .sharpa_nutscrew_pick_place_screw_env_cfg import FAMILY_PITCHES, NUTSCREW_OBJECT_SCALES, SharpaNutscrewPickPlaceScrewEnvCfg
 from .sharpa_nutscrew_pick_place_screw_utils import compute_joint_pos_targets, unscale
 
 
@@ -97,9 +97,14 @@ class SharpaNutscrewPickPlaceScrewEnv(DirectRLEnv):
         self.keypoint_offsets = self._make_keypoint_offsets()
         self.grasp_bounding_box_offsets = self._make_grasp_bounding_box_offsets()
         self.fixed_size_keypoint_offsets = self._make_keypoint_offsets(self.cfg.fixed_size)
+        self.debug_keypoint_offsets = self._make_debug_keypoint_offsets()
         debug_draw_enabled = self.cfg.debug_keypoints or self.cfg.debug_grasp_bounding_box
         self.keypoint_debug_draw = self._make_keypoint_debug_draw() if debug_draw_enabled else None
         self._all_env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+        self.nut_thread_angle = torch.zeros(self.num_envs, device=self.device)
+        self.prev_nut_yaw = torch.zeros(self.num_envs, device=self.device)
+        self.last_thread_angle_step = -torch.ones(self.num_envs, dtype=torch.long, device=self.device)
+        self.max_nut_thread_angle = self._max_nut_thread_angle()
         self._init_delay_noise_queues()
         self.table_contact_force = torch.zeros((self.num_envs, 3), device=self.device)
         self.table_contact_force_smoothed = torch.zeros_like(self.table_contact_force)
@@ -151,7 +156,77 @@ class SharpaNutscrewPickPlaceScrewEnv(DirectRLEnv):
             orientation=cfg.init_state.rot,
         )
         self._ensure_root_rigid_body(cfg.prim_path, cfg)
+        self._add_nut_rotation_indicator(cfg.prim_path)
         return RigidObject(cfg.replace(spawn=None))
+
+    def _add_nut_rotation_indicator(self, prim_path: str) -> None:
+        if not getattr(self.cfg, "rotation_indicator_enabled", True):
+            return
+
+        from pxr import Gf, UsdGeom
+
+        stage = sim_utils.get_current_stage()
+        shaft_length = float(self.cfg.rotation_indicator_length)
+        shaft_width = float(self.cfg.rotation_indicator_width)
+        z_offset = float(self.cfg.rotation_indicator_z_offset)
+        head_length = shaft_length * 0.35
+        head_y = shaft_width * 2.6
+        thickness = shaft_width
+
+        for prim in sim_utils.find_matching_prims(prim_path):
+            prim_name = prim.GetName()
+            if prim_name == "object":
+                color = Gf.Vec3f(0.05, 0.45, 1.0)
+            elif prim_name == "goal_object":
+                color = Gf.Vec3f(1.0, 0.1, 0.85)
+            else:
+                continue
+
+            marker_root_path = f"{prim.GetPath().pathString}/rotation_indicator"
+            UsdGeom.Xform.Define(stage, marker_root_path)
+
+            self._define_indicator_bar(
+                f"{marker_root_path}/shaft",
+                position=(0.5 * shaft_length, 0.0, z_offset),
+                rotation_z_degrees=0.0,
+                scale=(shaft_length, shaft_width, thickness),
+                color=color,
+            )
+            self._define_indicator_bar(
+                f"{marker_root_path}/head_left",
+                position=(shaft_length - 0.25 * head_length, head_y, z_offset),
+                rotation_z_degrees=-35.0,
+                scale=(head_length, shaft_width, thickness),
+                color=color,
+            )
+            self._define_indicator_bar(
+                f"{marker_root_path}/head_right",
+                position=(shaft_length - 0.25 * head_length, -head_y, z_offset),
+                rotation_z_degrees=35.0,
+                scale=(head_length, shaft_width, thickness),
+                color=color,
+            )
+
+    def _define_indicator_bar(
+        self,
+        prim_path: str,
+        position: tuple[float, float, float],
+        rotation_z_degrees: float,
+        scale: tuple[float, float, float],
+        color,
+    ) -> None:
+        from pxr import Gf, UsdGeom
+
+        stage = sim_utils.get_current_stage()
+        cube = UsdGeom.Cube.Define(stage, prim_path)
+        cube.CreateSizeAttr(1.0)
+        cube.CreateDisplayColorAttr([color])
+        cube.CreateDisplayOpacityAttr([1.0])
+        xformable = UsdGeom.Xformable(cube.GetPrim())
+        xformable.ClearXformOpOrder()
+        xformable.AddTranslateOp().Set(Gf.Vec3d(*position))
+        xformable.AddRotateXYZOp().Set(Gf.Vec3f(0.0, 0.0, float(rotation_z_degrees)))
+        xformable.AddScaleOp().Set(Gf.Vec3f(*scale))
 
     def _ensure_root_rigid_body(self, prim_path: str, cfg) -> None:
         for prim in sim_utils.find_matching_prims(prim_path):
@@ -173,6 +248,19 @@ class SharpaNutscrewPickPlaceScrewEnv(DirectRLEnv):
             mass_props = getattr(cfg.spawn, "mass_props", None)
             if mass_props is not None and getattr(mass_props, "mass", None) is not None:
                 mass_api.CreateMassAttr(float(mass_props.mass))
+            if prim.GetName() in {"object", "goal_object"}:
+                self._enable_visual_mesh_collisions(prim)
+
+    def _enable_visual_mesh_collisions(self, root_prim) -> None:
+        from pxr import UsdGeom
+
+        for prim in Usd.PrimRange(root_prim):
+            if prim == root_prim or not prim.IsA(UsdGeom.Mesh):
+                continue
+            collision_api = UsdPhysics.CollisionAPI.Apply(prim)
+            collision_api.CreateCollisionEnabledAttr(True)
+            mesh_collision_api = UsdPhysics.MeshCollisionAPI.Apply(prim)
+            mesh_collision_api.CreateApproximationAttr("convexHull")
 
     def _make_multi_usd_object(self, cfg) -> RigidObject:
         cfg.spawn.func(
@@ -262,6 +350,7 @@ class SharpaNutscrewPickPlaceScrewEnv(DirectRLEnv):
         rigid_object.data.default_inertia = inertias.clone()
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
+        self._apply_screwing_kinematic_constraint(integrate_thread_angle=False)
         self.prev_actions.copy_(self.actions)
         actions = actions.clone().clamp(-1.0, 1.0)
         self.action_queue = self._update_queue(self.action_queue, actions)
@@ -475,6 +564,10 @@ class SharpaNutscrewPickPlaceScrewEnv(DirectRLEnv):
             object_drop_height = object_start_pose[2].expand(num_ids)
         object_state[:, 7:13] = 0.0
         self.object.write_root_state_to_sim(object_state, env_ids)
+        if getattr(self.cfg, "screwing_phase", False):
+            self.nut_thread_angle[env_ids] = 0.0
+            self.prev_nut_yaw[env_ids] = self._yaw_from_quat(object_state[:, 3:7])
+            self.last_thread_angle_step[env_ids] = -1
 
         dof_pos = self.robot_start_joint_pos[env_ids].clone()
         dof_vel = self.robot_start_joint_vel[env_ids].clone()
@@ -684,7 +777,76 @@ class SharpaNutscrewPickPlaceScrewEnv(DirectRLEnv):
 
         self.object.set_external_force_and_torque(self.object_forces, self.object_torques, is_global=False)
 
+    def _max_nut_thread_angle(self) -> float:
+        pitch = FAMILY_PITCHES.get(self.cfg.screwing_family, FAMILY_PITCHES["M12"])
+        thread_length = float(getattr(self.cfg, "screwing_thread_length", 0.0))
+        if pitch <= 0.0 or thread_length <= 0.0:
+            return 0.0
+        return thread_length * (2.0 * math.pi) / pitch
+
+    def _yaw_from_quat(self, quat_wxyz: torch.Tensor) -> torch.Tensor:
+        w, x, y, z = quat_wxyz.unbind(dim=-1)
+        return torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+    def _wrap_to_pi(self, angle: torch.Tensor) -> torch.Tensor:
+        return torch.atan2(torch.sin(angle), torch.cos(angle))
+
+    def _apply_screwing_kinematic_constraint(self, integrate_thread_angle: bool = True) -> None:
+        if not getattr(self.cfg, "screwing_phase", False) or not getattr(self.cfg, "screwing_kinematic_constraint", True):
+            return
+
+        pitch = FAMILY_PITCHES.get(self.cfg.screwing_family, FAMILY_PITCHES["M12"])
+        velocity = self.object.data.root_state_w[:, 7:13].clone()
+
+        angular_damping = float(getattr(self.cfg, "screwing_thread_angular_damping", 0.0))
+        if angular_damping > 0.0:
+            velocity[:, 5] *= math.exp(-angular_damping * self.step_dt)
+
+        static_angular_velocity = float(getattr(self.cfg, "screwing_thread_static_angular_velocity", 0.0))
+        if static_angular_velocity > 0.0:
+            velocity[:, 5] = torch.where(
+                velocity[:, 5].abs() < static_angular_velocity,
+                torch.zeros_like(velocity[:, 5]),
+                velocity[:, 5],
+            )
+
+        thread_angle = self.nut_thread_angle.clone()
+        if integrate_thread_angle:
+            needs_integration = self.last_thread_angle_step != int(self.common_step_counter)
+            delta_yaw = velocity[:, 5] * self.step_dt
+            delta_deadband = float(getattr(self.cfg, "screwing_thread_delta_deadband", 0.0))
+            if delta_deadband > 0.0:
+                delta_yaw = torch.where(delta_yaw.abs() < delta_deadband, torch.zeros_like(delta_yaw), delta_yaw)
+            proposed_thread_angle = torch.clamp(self.nut_thread_angle + delta_yaw, 0.0, self.max_nut_thread_angle)
+            thread_angle = torch.where(needs_integration, proposed_thread_angle, thread_angle)
+            self.last_thread_angle_step = torch.where(
+                needs_integration,
+                torch.full_like(self.last_thread_angle_step, int(self.common_step_counter)),
+                self.last_thread_angle_step,
+            )
+
+        slide = -(pitch / (2.0 * math.pi)) * thread_angle
+        start_pose = torch.tensor(self.cfg.object_start_pose, device=self.device, dtype=self.object.data.root_pos_w.dtype)
+        pose = self.object.data.root_state_w[:, :7].clone()
+        pose[:, 0:3] = start_pose[0:3] + self.scene.env_origins
+        pose[:, 2] += slide
+        z_axis = torch.tensor((0.0, 0.0, 1.0), device=self.device).repeat(self.num_envs, 1)
+        pose[:, 3:7] = quat_from_angle_axis(thread_angle, z_axis)
+        self.object.write_root_pose_to_sim(pose)
+
+        at_thread_top = (thread_angle <= 1.0e-6) & (velocity[:, 5] < 0.0)
+        at_thread_end = (thread_angle >= self.max_nut_thread_angle - 1.0e-6) & (velocity[:, 5] > 0.0)
+        velocity[:, 5] = torch.where(at_thread_top | at_thread_end, torch.zeros_like(velocity[:, 5]), velocity[:, 5])
+        velocity[:, 0:2] = 0.0
+        velocity[:, 2] = -(pitch / (2.0 * math.pi)) * velocity[:, 5]
+        velocity[:, 3:5] = 0.0
+        self.object.write_root_velocity_to_sim(velocity)
+
+        self.nut_thread_angle.copy_(thread_angle)
+        self.prev_nut_yaw.copy_(thread_angle)
+
     def _compute_intermediate_values(self) -> None:
+        self._apply_screwing_kinematic_constraint()
         self.robot_dof_pos = self.robot.data.joint_pos[:, self.actuated_dof_indices]
         self.robot_dof_vel = self.robot.data.joint_vel[:, self.actuated_dof_indices]
         self.palm_rot = self.robot.data.body_quat_w[:, self.palm_body_idx]
@@ -738,14 +900,17 @@ class SharpaNutscrewPickPlaceScrewEnv(DirectRLEnv):
         )
         self._visualize_debug_shapes()
         if self.table_contact_sensor is not None:
-            self._update_table_contact_force_buffers(self.table_contact_sensor.data.net_forces_w)
+            self._update_table_contact_force_buffers(self.table_contact_sensor.data)
         else:
             self.table_contact_force = torch.zeros((self.num_envs, 3), device=self.device)
             self.table_contact_force_smoothed = torch.zeros_like(self.table_contact_force)
             self.max_table_contact_force_norm_smoothed = torch.zeros(self.num_envs, device=self.device)
 
-    def _update_table_contact_force_buffers(self, net_forces_w: torch.Tensor) -> None:
-        self.table_contact_force = net_forces_w.sum(dim=1)
+    def _update_table_contact_force_buffers(self, contact_data) -> None:
+        if getattr(contact_data, "force_matrix_w", None) is not None:
+            self.table_contact_force = contact_data.force_matrix_w.sum(dim=(1, 2))
+        else:
+            self.table_contact_force = contact_data.net_forces_w.sum(dim=1)
         smoothing_alpha = 0.1
         self.table_contact_force_smoothed += smoothing_alpha * (
             self.table_contact_force - self.table_contact_force_smoothed
@@ -852,6 +1017,16 @@ class SharpaNutscrewPickPlaceScrewEnv(DirectRLEnv):
         num_ids = env_ids.shape[0]
         goal_state = self.goal_object.data.default_root_state[env_ids].clone()
 
+        if getattr(self.cfg, "screwing_phase", False):
+            goal_pos, goal_rot = self._sample_screwing_goals(env_ids, is_first_goal=is_first_goal)
+            self.object_goal_pos[env_ids] = goal_pos
+            self.object_goal_rot[env_ids] = goal_rot
+            goal_state[:, 0:3] = goal_pos + self.scene.env_origins[env_ids]
+            goal_state[:, 3:7] = goal_rot
+            goal_state[:, 7:13] = 0.0
+            self.goal_object.write_root_state_to_sim(goal_state, env_ids)
+            return
+
         mins, maxs = self._target_volume_bounds()
 
         if (not is_first_goal) and self.cfg.goal_sampling_type == "delta":
@@ -898,6 +1073,27 @@ class SharpaNutscrewPickPlaceScrewEnv(DirectRLEnv):
             goal_state[:, 3:7] = self.object_goal_rot[env_ids]
         goal_state[:, 7:13] = 0.0
         self.goal_object.write_root_state_to_sim(goal_state, env_ids)
+
+    def _sample_screwing_goals(self, env_ids: torch.Tensor, is_first_goal: bool) -> tuple[torch.Tensor, torch.Tensor]:
+        num_ids = env_ids.shape[0]
+        min_degrees, max_degrees = self.cfg.screwing_goal_angle_range_degrees
+        min_angle = math.radians(float(min_degrees))
+        max_angle = math.radians(float(max_degrees))
+        delta_angle = sample_uniform(min_angle, max_angle, (num_ids,), self.device)
+        base_angle = torch.zeros(num_ids, device=self.device)
+        if not is_first_goal:
+            base_angle = self.nut_thread_angle[env_ids]
+        angle = torch.clamp(base_angle + delta_angle, 0.0, self.max_nut_thread_angle)
+
+        pitch = FAMILY_PITCHES.get(self.cfg.screwing_family, FAMILY_PITCHES["M12"])
+        slide = -(pitch / (2.0 * math.pi)) * angle
+        start_pose = torch.tensor(self.cfg.object_start_pose, device=self.device)
+        goal_pos = start_pose[0:3].unsqueeze(0).repeat(num_ids, 1)
+        goal_pos[:, 2] += slide
+
+        z_axis = torch.tensor((0.0, 0.0, 1.0), device=self.device).repeat(num_ids, 1)
+        goal_rot = quat_from_angle_axis(angle, z_axis)
+        return goal_pos, goal_rot
 
     def _target_volume_bounds(self) -> tuple[torch.Tensor, torch.Tensor]:
         mins = torch.tensor(self.cfg.target_volume_mins, device=self.device)
@@ -958,7 +1154,24 @@ class SharpaNutscrewPickPlaceScrewEnv(DirectRLEnv):
             ],
             device=self.device,
         )
+        debug_size = getattr(self.cfg, "debug_grasp_bounding_box_size", None)
+        if debug_size is not None:
+            padding = float(getattr(self.cfg, "debug_grasp_bounding_box_padding", 0.0))
+            size = torch.tensor(debug_size, device=self.device, dtype=offsets.dtype) + 2.0 * padding
+            return offsets * (0.5 * size)
         return offsets * (0.5 * self.cfg.keypoint_scale * self.cfg.object_base_size)
+
+    def _make_debug_keypoint_offsets(self) -> torch.Tensor:
+        debug_size = getattr(self.cfg, "debug_keypoint_size", None)
+        if debug_size is None:
+            return self.keypoint_offsets
+        offsets = torch.tensor(
+            [[1.0, 1.0, 1.0], [1.0, 1.0, -1.0], [-1.0, -1.0, 1.0], [-1.0, -1.0, -1.0]],
+            device=self.device,
+        )
+        padding = float(getattr(self.cfg, "debug_keypoint_padding", 0.0))
+        size = torch.tensor(debug_size, device=self.device, dtype=offsets.dtype) + 2.0 * padding
+        return offsets * (0.5 * size)
 
     def _compute_keypoints(
         self,
@@ -1017,21 +1230,27 @@ class SharpaNutscrewPickPlaceScrewEnv(DirectRLEnv):
         if hasattr(self.keypoint_debug_draw, "clear_lines"):
             self.keypoint_debug_draw.clear_lines()
 
+        if self.cfg.debug_grasp_bounding_box:
+            self._visualize_grasp_bounding_box()
+
         if self.cfg.debug_keypoints:
-            object_keypoints_w = self.object_keypoints + self.scene.env_origins[:, None, :]
-            goal_keypoints_w = self.goal_keypoints + self.scene.env_origins[:, None, :]
+            object_keypoints = self._compute_keypoints(
+                self.object_pos, self.object_rot, self.object_scales, self.debug_keypoint_offsets
+            )
+            goal_keypoints = self._compute_keypoints(
+                self.object_goal_pos, self.object_goal_rot, self.object_scales, self.debug_keypoint_offsets
+            )
+            object_keypoints_w = object_keypoints + self.scene.env_origins[:, None, :]
+            goal_keypoints_w = goal_keypoints + self.scene.env_origins[:, None, :]
             object_points = [tuple(point) for point in object_keypoints_w.reshape(-1, 3).detach().cpu().tolist()]
             goal_points = [tuple(point) for point in goal_keypoints_w.reshape(-1, 3).detach().cpu().tolist()]
-            point_size = max(1.0, self.cfg.debug_keypoint_radius * 1000.0)
+            point_size = max(6.0, self.cfg.debug_keypoint_radius * 1400.0)
 
             self.keypoint_debug_draw.draw_points(
                 object_points + goal_points,
-                [(0.1, 0.45, 1.0, 1.0)] * len(object_points) + [(1.0, 0.15, 0.85, 1.0)] * len(goal_points),
+                [(1.0, 0.88, 0.05, 1.0)] * len(object_points) + [(0.0, 0.95, 1.0, 1.0)] * len(goal_points),
                 [point_size] * (len(object_points) + len(goal_points)),
             )
-
-        if self.cfg.debug_grasp_bounding_box:
-            self._visualize_grasp_bounding_box()
 
     def _visualize_grasp_bounding_box(self) -> None:
         object_corners = self._compute_keypoints(

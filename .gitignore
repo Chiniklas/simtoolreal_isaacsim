@@ -18,6 +18,7 @@ __pycache__/
 /wandb/
 /eval_results/
 simtoolreal_lab/tasks/simtoolreal_sharpa/logs/
+simtoolreal_lab/tasks/sharpa_nutscrew_pick_place_screw/logs/
 
 # Local downloaded policies/checkpoints
 simtoolreal_lab/pretrained_policy/
@@ -45,6 +46,7 @@ simtoolreal_lab/assets/kuka_sharpa/**/*.usd
 /devel/
 /install/
 /log/
+/logs/
 .catkin_workspace
 assets/
 dextoolbench/

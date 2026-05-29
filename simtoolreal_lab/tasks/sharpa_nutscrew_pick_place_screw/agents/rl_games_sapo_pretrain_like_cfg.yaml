@@ -49,8 +49,8 @@ env_cfg:
   object_ang_vel_penalty_scale: 0.0
   object_z_low_reset_threshold: 0.1
   hand_far_from_object_threshold: 1.5
-  with_table_force_sensor: False
-  table_force_threshold: 100.0
+  with_table_force_sensor: True
+  table_force_threshold: 5.0
   reset_when_dropped: True
   success_tolerance: 0.075
   target_success_tolerance: 0.01

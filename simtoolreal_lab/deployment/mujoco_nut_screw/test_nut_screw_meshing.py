@@ -25,6 +25,9 @@ mechanics are instead represented analytically with MuJoCo joints:
   state onto the same equation after each step. This keeps the tiny pitch-ratio
   relation exact even when the soft equality solver/contact solver would
   otherwise drift.
+* the projection can also apply simple damping/static friction to residual
+  screw-axis motion. A nonzero commanded spin velocity is still an external
+  drive, so set ``--spin-velocity 0`` when testing passive coast-down.
 
 This means the visual thread is used for appearance, while the screw relation is
 stable and explicit. A positive commanded nut spin moves the nut downward along
@@ -273,7 +276,14 @@ def _thread_slope(family: str) -> float:
     return -FAMILY_PITCHES.get(family, FAMILY_PITCHES["M12"]) / (2.0 * np.pi)
 
 
-def _project_thread_state(model, data, family: str) -> None:
+def _project_thread_state(
+    model,
+    data,
+    family: str,
+    angular_damping: float,
+    static_angular_velocity: float,
+    velocity_deadband: float,
+) -> None:
     slope = _thread_slope(family)
     spin_joint = model.joint("nut_spin_joint")
     slide_joint = model.joint("nut_thread_slide_joint")
@@ -281,8 +291,26 @@ def _project_thread_state(model, data, family: str) -> None:
     slide_qadr = int(slide_joint.qposadr[0])
     spin_dadr = int(spin_joint.dofadr[0])
     slide_dadr = int(slide_joint.dofadr[0])
+    slide_range = np.asarray(slide_joint.range, dtype=float)
+
+    spin_velocity = data.qvel[slide_dadr] / slope
+    if angular_damping > 0.0:
+        spin_velocity *= np.exp(-angular_damping * model.opt.timestep)
+    if velocity_deadband > 0.0 and abs(spin_velocity) < velocity_deadband:
+        spin_velocity = 0.0
+    if static_angular_velocity > 0.0 and abs(spin_velocity) < static_angular_velocity:
+        spin_velocity = 0.0
+
+    slide_velocity = slope * spin_velocity
+    at_slide_min = data.qpos[slide_qadr] <= slide_range[0] + 1.0e-8 and slide_velocity < 0.0
+    at_slide_max = data.qpos[slide_qadr] >= slide_range[1] - 1.0e-8 and slide_velocity > 0.0
+    if at_slide_min or at_slide_max:
+        spin_velocity = 0.0
+        slide_velocity = 0.0
+
     data.qpos[spin_qadr] = data.qpos[slide_qadr] / slope
-    data.qvel[spin_dadr] = data.qvel[slide_dadr] / slope
+    data.qvel[spin_dadr] = spin_velocity
+    data.qvel[slide_dadr] = slide_velocity
 
 
 def _command_thread_velocity(model, data, family: str, spin_velocity: float) -> None:
@@ -306,6 +334,24 @@ def main() -> None:
         type=float,
         default=6.0,
         help="Constant commanded nut angular velocity around Z, rad/s. Positive spins the nut downward.",
+    )
+    parser.add_argument(
+        "--thread-angular-damping",
+        type=float,
+        default=12.0,
+        help="Viscous damping applied to passive thread angular velocity, 1/s.",
+    )
+    parser.add_argument(
+        "--thread-static-angular-velocity",
+        type=float,
+        default=0.04,
+        help="Static-friction threshold for passive thread angular velocity, rad/s.",
+    )
+    parser.add_argument(
+        "--thread-velocity-deadband",
+        type=float,
+        default=1.0e-4,
+        help="Deadband for tiny passive thread angular velocity, rad/s.",
     )
     parser.add_argument("--steps", type=int, default=None, help="Run finite steps headlessly/viewer; omit to run until viewer closes.")
     parser.add_argument("--headless", action="store_true", help="Run without viewer.")
@@ -346,6 +392,12 @@ def main() -> None:
     print(f"[INFO] Collision mode: proxy, density={args.density:.1f} kg/m^3")
     print(f"[INFO] Analytical thread pitch: {FAMILY_PITCHES.get(args.family, FAMILY_PITCHES['M12']):.6f} m/rev")
     print(f"[INFO] Nut gravcomp: 1.0, commanded spin velocity={args.spin_velocity:.3f} rad/s")
+    print(
+        "[INFO] Thread damping/friction: "
+        f"damping={args.thread_angular_damping:.3f} 1/s, "
+        f"static_threshold={args.thread_static_angular_velocity:.3f} rad/s, "
+        f"deadband={args.thread_velocity_deadband:.1e} rad/s"
+    )
     print(f"[INFO] Nut mass from MuJoCo model: {float(model.body('nut').mass[0]):.6f} kg")
 
     viewer = None
@@ -368,7 +420,14 @@ def main() -> None:
         start = time.time()
         _command_thread_velocity(model, data, args.family, args.spin_velocity)
         mujoco.mj_step(model, data)
-        _project_thread_state(model, data, args.family)
+        _project_thread_state(
+            model,
+            data,
+            args.family,
+            args.thread_angular_damping,
+            args.thread_static_angular_velocity,
+            args.thread_velocity_deadband,
+        )
         _command_thread_velocity(model, data, args.family, args.spin_velocity)
         mujoco.mj_forward(model, data)
         if viewer is not None:
