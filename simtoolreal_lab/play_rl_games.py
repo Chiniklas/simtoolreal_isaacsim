@@ -14,7 +14,7 @@ from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="Play an Isaac Lab RL-Games checkpoint.")
 parser.add_argument("--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O.")
-parser.add_argument("--num_envs", type=int, default=None, help="Number of environments.")
+parser.add_argument("--num_envs", type=int, default=1, help="Number of environments.")
 parser.add_argument("--task", type=str, default="simtoolreal_sharpa", help="Gym task id.")
 parser.add_argument("--checkpoint", type=str, required=True, help="Path to checkpoint.")
 parser.add_argument("--object", type=str, default=None, help="Object or asset name to replay with.")
@@ -70,6 +70,30 @@ class SimToolRealRlGamesGpuEnv(RlGamesGpuEnv):
 def _apply_object_selection(env_cfg) -> None:
     cfg_module = importlib.import_module(env_cfg.__class__.__module__)
     cfg_module.apply_object_selection(env_cfg)
+
+
+def _set_cfg_value(cfg, key_path: str, value) -> None:
+    target = cfg
+    keys = key_path.split(".")
+    for key in keys[:-1]:
+        if not hasattr(target, key):
+            raise AttributeError(f"Unknown env cfg key '{key_path}': missing '{key}'.")
+        target = getattr(target, key)
+    final_key = keys[-1]
+    if not hasattr(target, final_key):
+        raise AttributeError(f"Unknown env cfg key '{key_path}': missing '{final_key}'.")
+    setattr(target, final_key, value)
+
+
+def _apply_agent_env_cfg(env_cfg, agent_cfg: dict) -> None:
+    env_overrides = agent_cfg.get("env_cfg", {})
+    for key_path, value in env_overrides.items():
+        _set_cfg_value(env_cfg, key_path, value)
+
+    if "sim_dt" in env_overrides:
+        env_cfg.sim.dt = env_cfg.sim_dt
+    if "decimation" in env_overrides:
+        env_cfg.sim.render_interval = env_cfg.decimation
 
 
 def _checkpoint_params_dir(checkpoint_path: str | pathlib.Path) -> pathlib.Path | None:
@@ -155,6 +179,8 @@ def _checkpoint_success_tolerance(checkpoint_path: str) -> float | None:
 def main():
     resume_path = retrieve_file_path(args_cli.checkpoint)
     env_cfg = _load_replay_env_cfg(args_cli.task, resume_path)
+    agent_cfg = _load_replay_agent_cfg(args_cli.task, resume_path)
+    _apply_agent_env_cfg(env_cfg, agent_cfg)
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     if args_cli.disable_fabric:
@@ -166,7 +192,6 @@ def main():
         env_cfg.object_name = args_cli.object
     env_cfg.debug_keypoints = args_cli.debug_keypoints
     _apply_object_selection(env_cfg)
-    agent_cfg = _load_replay_agent_cfg(args_cli.task, resume_path)
     agent_cfg["params"]["load_checkpoint"] = True
     agent_cfg["params"]["load_path"] = resume_path
     if args_cli.device is not None:

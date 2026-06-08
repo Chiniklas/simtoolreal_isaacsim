@@ -36,6 +36,142 @@ FAMILY_PITCHES = {
     "M20": 0.0025,
 }
 
+FINGER_NAMES = ("index", "middle", "ring", "thumb", "pinky")
+DEFAULT_ACTIVE_FINGERS = FINGER_NAMES
+FINGERTIP_BODY_NAMES_BY_FINGER = {
+    "thumb": "left_thumb_DP",
+    "index": "left_index_DP",
+    "middle": "left_middle_DP",
+    "ring": "left_ring_DP",
+    "pinky": "left_pinky_DP",
+}
+FINGERTIP_OFFSET_BY_FINGER = {
+    finger: (0.02, 0.002, 0.0) for finger in FINGER_NAMES
+}
+FINGER_CONTACT_BODY_NAMES = {
+    "thumb": (
+        "left_thumb_CMC_VL",
+        "left_thumb_MC",
+        "left_thumb_MCP_VL",
+        "left_thumb_PP",
+        "left_thumb_DP",
+    ),
+    "index": (
+        "left_index_MCP_VL",
+        "left_index_PP",
+        "left_index_MP",
+        "left_index_DP",
+    ),
+    "middle": (
+        "left_middle_MCP_VL",
+        "left_middle_PP",
+        "left_middle_MP",
+        "left_middle_DP",
+    ),
+    "ring": (
+        "left_ring_MCP_VL",
+        "left_ring_PP",
+        "left_ring_MP",
+        "left_ring_DP",
+    ),
+    "pinky": (
+        "left_pinky_MC",
+        "left_pinky_MCP_VL",
+        "left_pinky_PP",
+        "left_pinky_MP",
+        "left_pinky_DP",
+    ),
+}
+
+
+def _normalize_active_fingers(active_fingers: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+    active_set = set(active_fingers)
+    unknown = sorted(active_set - set(FINGER_NAMES))
+    if unknown:
+        raise ValueError(f"Unknown active fingers {unknown}. Valid fingers: {FINGER_NAMES}")
+    if not active_set:
+        raise ValueError("At least one active finger is required.")
+    return tuple(finger for finger in FINGER_NAMES if finger in active_set)
+
+
+def _joint_is_arm(joint_name: str) -> bool:
+    return joint_name.startswith("iiwa14_joint_")
+
+
+def _joint_is_finger(joint_name: str, finger: str) -> bool:
+    return f"_{finger}_" in joint_name
+
+
+def _finger_masked_joint_names(active_fingers: tuple[str, ...] | list[str]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    active = set(_normalize_active_fingers(active_fingers))
+    actuated_joint_names = tuple(
+        joint_name
+        for joint_name in KUKA_SHARPA_JOINT_NAMES
+        if _joint_is_arm(joint_name) or any(_joint_is_finger(joint_name, finger) for finger in active)
+    )
+    inactive_joint_names = tuple(
+        joint_name
+        for joint_name in KUKA_SHARPA_JOINT_NAMES
+        if (not _joint_is_arm(joint_name))
+        and not any(_joint_is_finger(joint_name, finger) for finger in active)
+    )
+    return actuated_joint_names, inactive_joint_names
+
+
+def _fingertip_body_names(active_fingers: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+    return tuple(FINGERTIP_BODY_NAMES_BY_FINGER[finger] for finger in _normalize_active_fingers(active_fingers))
+
+
+def _fingertip_offsets(active_fingers: tuple[str, ...] | list[str]) -> tuple[tuple[float, float, float], ...]:
+    return tuple(FINGERTIP_OFFSET_BY_FINGER[finger] for finger in _normalize_active_fingers(active_fingers))
+
+
+def _table_contact_filter_paths(active_fingers: tuple[str, ...] | list[str]) -> list[str]:
+    return [
+        f"/World/envs/env_.*/Robot/kuka_sharpa/{body_name}"
+        for finger in _normalize_active_fingers(active_fingers)
+        for body_name in FINGER_CONTACT_BODY_NAMES[finger]
+    ]
+
+
+def _policy_obs_dim(num_actions: int, num_fingertips: int) -> int:
+    return 3 * num_actions + 3 * num_fingertips + 38
+
+
+def _critic_state_dim(num_actions: int, num_fingertips: int) -> int:
+    return 3 * num_actions + 4 * num_fingertips + 55
+
+
+def apply_finger_mask(cfg) -> None:
+    active_fingers = _normalize_active_fingers(getattr(cfg, "active_fingers", DEFAULT_ACTIVE_FINGERS))
+    actuated_joint_names, inactive_joint_names = _finger_masked_joint_names(active_fingers)
+    fingertip_body_names = _fingertip_body_names(active_fingers)
+
+    cfg.active_fingers = active_fingers
+    cfg.actuated_joint_names = actuated_joint_names
+    cfg.inactive_joint_names = inactive_joint_names
+    cfg.fingertip_body_names = fingertip_body_names
+    cfg.fingertip_offsets = _fingertip_offsets(active_fingers)
+
+    cfg.num_actions = len(actuated_joint_names)
+    cfg.action_space = cfg.num_actions
+    cfg.num_observations = _policy_obs_dim(cfg.num_actions, len(fingertip_body_names))
+    cfg.observation_space = cfg.num_observations
+    cfg.num_states = _critic_state_dim(cfg.num_actions, len(fingertip_body_names))
+    cfg.state_space = cfg.num_states
+
+    if hasattr(cfg, "table_contact_sensor"):
+        cfg.table_contact_sensor.filter_prim_paths_expr = _table_contact_filter_paths(active_fingers)
+
+
+DEFAULT_ACTUATED_JOINT_NAMES, DEFAULT_INACTIVE_JOINT_NAMES = _finger_masked_joint_names(DEFAULT_ACTIVE_FINGERS)
+DEFAULT_FINGERTIP_BODY_NAMES = _fingertip_body_names(DEFAULT_ACTIVE_FINGERS)
+DEFAULT_FINGERTIP_OFFSETS = _fingertip_offsets(DEFAULT_ACTIVE_FINGERS)
+DEFAULT_NUM_ACTIONS = len(DEFAULT_ACTUATED_JOINT_NAMES)
+DEFAULT_NUM_FINGERTIPS = len(DEFAULT_FINGERTIP_BODY_NAMES)
+DEFAULT_NUM_OBSERVATIONS = _policy_obs_dim(DEFAULT_NUM_ACTIONS, DEFAULT_NUM_FINGERTIPS)
+DEFAULT_NUM_STATES = _critic_state_dim(DEFAULT_NUM_ACTIONS, DEFAULT_NUM_FINGERTIPS)
+
 
 @dataclass(frozen=True)
 class MeshBounds:
@@ -398,12 +534,12 @@ class SharpaNutscrewPickPlaceScrewEnvCfg(DirectRLEnvCfg):
     sim_dt = 1.0 / 60.0
     decimation = 1
     episode_length_s = 10.0
-    num_actions = 29
-    num_observations = 140
-    num_states = 162
-    observation_space = 140
-    state_space = 162
-    action_space = 29
+    num_actions = DEFAULT_NUM_ACTIONS
+    num_observations = DEFAULT_NUM_OBSERVATIONS
+    num_states = DEFAULT_NUM_STATES
+    observation_space = DEFAULT_NUM_OBSERVATIONS
+    state_space = DEFAULT_NUM_STATES
+    action_space = DEFAULT_NUM_ACTIONS
     asymmetric_obs = True
 
     # simulation
@@ -434,23 +570,13 @@ class SharpaNutscrewPickPlaceScrewEnvCfg(DirectRLEnvCfg):
     object_name = DEFAULT_SCREWING_NUT_NAME
     multi_asset_names = tuple(sorted(NUTSCREW_USD_PATHS))
     robot_cfg = KUKA_SHARPA_CFG.replace(prim_path="/World/envs/env_.*/Robot")
-    actuated_joint_names = KUKA_SHARPA_JOINT_NAMES
+    active_fingers = DEFAULT_ACTIVE_FINGERS
+    actuated_joint_names = DEFAULT_ACTUATED_JOINT_NAMES
+    inactive_joint_names = DEFAULT_INACTIVE_JOINT_NAMES
     palm_body_name = "iiwa14_link_7"
-    fingertip_body_names = [
-        "left_index_DP",
-        "left_middle_DP",
-        "left_ring_DP",
-        "left_thumb_DP",
-        "left_pinky_DP",
-    ]
+    fingertip_body_names = DEFAULT_FINGERTIP_BODY_NAMES
     palm_offset = (0.0, -0.02, 0.16)
-    fingertip_offsets = (
-        (0.02, 0.002, 0.0),
-        (0.02, 0.002, 0.0),
-        (0.02, 0.002, 0.0),
-        (0.02, 0.002, 0.0),
-        (0.02, 0.002, 0.0),
-    )
+    fingertip_offsets = DEFAULT_FINGERTIP_OFFSETS
 
     table_cfg: RigidObjectCfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/table",
@@ -467,30 +593,7 @@ class SharpaNutscrewPickPlaceScrewEnvCfg(DirectRLEnvCfg):
     table_contact_sensor: ContactSensorCfg = ContactSensorCfg(
         prim_path="/World/envs/env_.*/table",
         debug_vis=False,
-        filter_prim_paths_expr=[
-            "/World/envs/env_.*/Robot/kuka_sharpa/left_thumb_CMC_VL",
-            "/World/envs/env_.*/Robot/kuka_sharpa/left_thumb_MC",
-            "/World/envs/env_.*/Robot/kuka_sharpa/left_thumb_MCP_VL",
-            "/World/envs/env_.*/Robot/kuka_sharpa/left_thumb_PP",
-            "/World/envs/env_.*/Robot/kuka_sharpa/left_thumb_DP",
-            "/World/envs/env_.*/Robot/kuka_sharpa/left_index_MCP_VL",
-            "/World/envs/env_.*/Robot/kuka_sharpa/left_index_PP",
-            "/World/envs/env_.*/Robot/kuka_sharpa/left_index_MP",
-            "/World/envs/env_.*/Robot/kuka_sharpa/left_index_DP",
-            "/World/envs/env_.*/Robot/kuka_sharpa/left_middle_MCP_VL",
-            "/World/envs/env_.*/Robot/kuka_sharpa/left_middle_PP",
-            "/World/envs/env_.*/Robot/kuka_sharpa/left_middle_MP",
-            "/World/envs/env_.*/Robot/kuka_sharpa/left_middle_DP",
-            "/World/envs/env_.*/Robot/kuka_sharpa/left_ring_MCP_VL",
-            "/World/envs/env_.*/Robot/kuka_sharpa/left_ring_PP",
-            "/World/envs/env_.*/Robot/kuka_sharpa/left_ring_MP",
-            "/World/envs/env_.*/Robot/kuka_sharpa/left_ring_DP",
-            "/World/envs/env_.*/Robot/kuka_sharpa/left_pinky_MC",
-            "/World/envs/env_.*/Robot/kuka_sharpa/left_pinky_MCP_VL",
-            "/World/envs/env_.*/Robot/kuka_sharpa/left_pinky_PP",
-            "/World/envs/env_.*/Robot/kuka_sharpa/left_pinky_MP",
-            "/World/envs/env_.*/Robot/kuka_sharpa/left_pinky_DP",
-        ],
+        filter_prim_paths_expr=_table_contact_filter_paths(DEFAULT_ACTIVE_FINGERS),
     )
     object_mass = 0.05
     object_cfg: RigidObjectCfg = make_generated_nut_object_cfg(DEFAULT_SCREWING_FAMILY, DEFAULT_SCREWING_NUT_NAME, object_mass)
@@ -513,6 +616,7 @@ class SharpaNutscrewPickPlaceScrewEnvCfg(DirectRLEnvCfg):
     reset_dof_pos_noise_fingers = 0.1
     reset_dof_pos_noise_arm = 0.1
     reset_dof_vel_noise = 0.5
+    reset_joint_pos_overrides: dict[str, float] | None = None
     randomize_object_rotation = False
     object_start_pose: tuple[float, float, float, float, float, float, float] | None = (
         *DEFAULT_SCREWING_POSE.nut_pos,
@@ -605,3 +709,4 @@ class SharpaNutscrewPickPlaceScrewEnvCfg(DirectRLEnvCfg):
     def __post_init__(self):
         super().__post_init__()
         apply_object_selection(self)
+        apply_finger_mask(self)

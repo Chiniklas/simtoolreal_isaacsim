@@ -7,6 +7,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import torch
@@ -17,6 +18,8 @@ from simtoolreal_lab.deployment.mujoco.mujoco_sim import (
     MUJOCO_REPLAY_SCENE_PATH,
     SIMTOOLREAL_LAB_DIR,
     TABLE_TOP_Z,
+    INIT_JOINT_POS,
+    JOINT_NAMES,
     MujocoSim,
     MujocoSimConfig,
 )
@@ -25,6 +28,87 @@ from simtoolreal_lab.deployment.mujoco.policy_player import RlPlayer
 
 N_OBS = 140
 N_ACT = 29
+HandMode = Literal["full", "tripod", "pinch"]
+FINGER_ORDER = ("index", "middle", "ring", "thumb", "pinky")
+HAND_MODE_ACTIVE_FINGERS: dict[str, tuple[str, ...]] = {
+    "full": FINGER_ORDER,
+    "tripod": ("thumb", "index", "middle"),
+    "pinch": ("thumb", "index"),
+}
+FINGER_JOINT_INDICES = {
+    "thumb": tuple(range(7, 12)),
+    "index": tuple(range(12, 16)),
+    "middle": tuple(range(16, 20)),
+    "ring": tuple(range(20, 24)),
+    "pinky": tuple(range(24, 29)),
+}
+FINGERTIP_INDEX_BY_FINGER = {finger: idx for idx, finger in enumerate(FINGER_ORDER)}
+ISAAC_TO_MUJOCO_JOINT_NAMES = {
+    "iiwa14_joint_1": "joint1",
+    "iiwa14_joint_2": "joint2",
+    "iiwa14_joint_3": "joint3",
+    "iiwa14_joint_4": "joint4",
+    "iiwa14_joint_5": "joint5",
+    "iiwa14_joint_6": "joint6",
+    "iiwa14_joint_7": "joint7",
+    "left_1_thumb_CMC_FE": "palmleft_thumb_CMC_FE",
+    "left_thumb_CMC_AA": "palmleft_thumb_CMC_AA",
+    "left_thumb_MCP_FE": "palmleft_thumb_MCP_FE",
+    "left_thumb_MCP_AA": "palmleft_thumb_MCP_AA",
+    "left_thumb_IP": "palmleft_thumb_IP",
+    "left_2_index_MCP_FE": "palmleft_index_MCP_FE",
+    "left_index_MCP_AA": "palmleft_index_MCP_AA",
+    "left_index_PIP": "palmleft_index_PIP",
+    "left_index_DIP": "palmleft_index_DIP",
+    "left_3_middle_MCP_FE": "palmleft_middle_MCP_FE",
+    "left_middle_MCP_AA": "palmleft_middle_MCP_AA",
+    "left_middle_PIP": "palmleft_middle_PIP",
+    "left_middle_DIP": "palmleft_middle_DIP",
+    "left_4_ring_MCP_FE": "palmleft_ring_MCP_FE",
+    "left_ring_MCP_AA": "palmleft_ring_MCP_AA",
+    "left_ring_PIP": "palmleft_ring_PIP",
+    "left_ring_DIP": "palmleft_ring_DIP",
+    "left_5_pinky_CMC": "palmleft_pinky_CMC",
+    "left_pinky_MCP_FE": "palmleft_pinky_MCP_FE",
+    "left_pinky_MCP_AA": "palmleft_pinky_MCP_AA",
+    "left_pinky_PIP": "palmleft_pinky_PIP",
+    "left_pinky_DIP": "palmleft_pinky_DIP",
+}
+TRIPOD_RESET_JOINT_POS_OVERRIDES = {
+    "iiwa14_joint_1": 2.617994,
+    "iiwa14_joint_2": -0.785398,
+    "iiwa14_joint_3": -1.527163,
+    "iiwa14_joint_4": 1.396263,
+    "iiwa14_joint_5": -0.872665,
+    "iiwa14_joint_6": 0.174533,
+    "iiwa14_joint_7": 0.022829,
+    "left_1_thumb_CMC_FE": 1.9199,
+    "left_thumb_CMC_AA": -0.3491,
+    "left_thumb_MCP_FE": 0.3473,
+    "left_thumb_MCP_AA": 0.3107,
+    "left_thumb_IP": 0.2513,
+    "left_2_index_MCP_FE": 0.0,
+    "left_index_MCP_AA": 0.0,
+    "left_index_PIP": 0.0,
+    "left_index_DIP": 0.3229,
+    "left_3_middle_MCP_FE": 0.0,
+    "left_middle_MCP_AA": 0.0,
+    "left_middle_PIP": 0.0,
+    "left_middle_DIP": 0.3229,
+    "left_4_ring_MCP_FE": 1.4,
+    "left_ring_PIP": 1.5,
+    "left_ring_DIP": 1.2,
+    "left_5_pinky_CMC": 0.26,
+    "left_pinky_MCP_FE": 1.4,
+    "left_pinky_PIP": 1.5,
+    "left_pinky_DIP": 1.2,
+}
+PINCH_RESET_JOINT_POS_OVERRIDES = {
+    **TRIPOD_RESET_JOINT_POS_OVERRIDES,
+    "left_3_middle_MCP_FE": 1.4,
+    "left_middle_PIP": 1.5,
+    "left_middle_DIP": 1.2,
+}
 DEFAULT_POLICY_DIR = SIMTOOLREAL_LAB_DIR / "pretrained_policy"
 DEFAULT_OBS_LIST = [
     "joint_pos",
@@ -199,6 +283,54 @@ def _scale(x: np.ndarray, lower: np.ndarray, upper: np.ndarray) -> np.ndarray:
     return 0.5 * (x + 1.0) * (upper - lower) + lower
 
 
+def _normalize_hand_mode(hand_mode: str) -> str:
+    normalized = hand_mode.lower().replace("_", "-")
+    if normalized not in HAND_MODE_ACTIVE_FINGERS:
+        valid = ", ".join(HAND_MODE_ACTIVE_FINGERS)
+        raise ValueError(f"Unknown hand mode '{hand_mode}'. Valid modes: {valid}.")
+    return normalized
+
+
+def _normalize_active_fingers(active_fingers: tuple[str, ...]) -> tuple[str, ...]:
+    active = set(active_fingers)
+    return tuple(finger for finger in FINGER_ORDER if finger in active)
+
+
+def _active_joint_indices_for_fingers(active_fingers: tuple[str, ...]) -> np.ndarray:
+    active = set(active_fingers)
+    joint_indices = list(range(7))
+    for finger in ("thumb", "index", "middle", "ring", "pinky"):
+        if finger in active:
+            joint_indices.extend(FINGER_JOINT_INDICES[finger])
+    return np.asarray(joint_indices, dtype=np.int64)
+
+
+def _active_fingertip_indices_for_fingers(active_fingers: tuple[str, ...]) -> np.ndarray:
+    return np.asarray([FINGERTIP_INDEX_BY_FINGER[finger] for finger in _normalize_active_fingers(active_fingers)])
+
+
+def _policy_obs_dim(num_actions: int, num_fingertips: int) -> int:
+    return 3 * num_actions + 3 * num_fingertips + 38
+
+
+def hand_mode_policy_dims(hand_mode: str) -> tuple[int, int]:
+    active_fingers = HAND_MODE_ACTIVE_FINGERS[_normalize_hand_mode(hand_mode)]
+    num_actions = int(_active_joint_indices_for_fingers(active_fingers).shape[0])
+    num_fingertips = int(_active_fingertip_indices_for_fingers(active_fingers).shape[0])
+    return _policy_obs_dim(num_actions, num_fingertips), num_actions
+
+
+def _mode_reset_joint_pos(hand_mode: str) -> np.ndarray:
+    q = INIT_JOINT_POS.copy()
+    if hand_mode == "full":
+        return q
+    overrides = PINCH_RESET_JOINT_POS_OVERRIDES if hand_mode == "pinch" else TRIPOD_RESET_JOINT_POS_OVERRIDES
+    for isaac_name, joint_pos in overrides.items():
+        mujoco_name = ISAAC_TO_MUJOCO_JOINT_NAMES[isaac_name]
+        q[JOINT_NAMES.index(mujoco_name)] = float(joint_pos)
+    return q
+
+
 def _compute_keypoints(pos: np.ndarray, quat_xyzw: np.ndarray, scales: np.ndarray) -> np.ndarray:
     offsets = KEYPOINT_OFFSETS[None] * 0.04 * 1.5 * 0.5 * scales[:, None]
     keypoints = np.zeros((pos.shape[0], 4, 3), dtype=np.float32)
@@ -348,15 +480,40 @@ def _compute_joint_pos_targets(
     arm_moving_average: float,
     arm_dof_speed_scale: float,
     dt: float,
+    active_joint_indices: np.ndarray | None = None,
 ) -> np.ndarray:
     cur_targets = prev_targets.copy()
-    cur_targets[:, 7:] = _scale(actions[:, 7:], Q_LOWER_LIMITS[7:], Q_UPPER_LIMITS[7:])
-    cur_targets[:, 7:] = hand_moving_average * cur_targets[:, 7:] + (1.0 - hand_moving_average) * prev_targets[:, 7:]
-    cur_targets[:, 7:] = np.clip(cur_targets[:, 7:], Q_LOWER_LIMITS[7:], Q_UPPER_LIMITS[7:])
+    active_joint_indices = np.arange(N_ACT, dtype=np.int64) if active_joint_indices is None else active_joint_indices
+    if actions.shape[1] != active_joint_indices.shape[0]:
+        raise ValueError(
+            f"Expected action width {active_joint_indices.shape[0]} for active joints, got {actions.shape[1]}."
+        )
 
-    cur_targets[:, :7] = prev_targets[:, :7] + arm_dof_speed_scale * dt * actions[:, :7]
-    cur_targets[:, :7] = np.clip(cur_targets[:, :7], Q_LOWER_LIMITS[:7], Q_UPPER_LIMITS[:7])
-    cur_targets[:, :7] = arm_moving_average * cur_targets[:, :7] + (1.0 - arm_moving_average) * prev_targets[:, :7]
+    arm_mask = active_joint_indices < 7
+    arm_indices = active_joint_indices[arm_mask]
+    hand_indices = active_joint_indices[~arm_mask]
+    n_arm = arm_indices.shape[0]
+
+    if hand_indices.size:
+        hand_actions = actions[:, n_arm:]
+        cur_targets[:, hand_indices] = _scale(hand_actions, Q_LOWER_LIMITS[hand_indices], Q_UPPER_LIMITS[hand_indices])
+        cur_targets[:, hand_indices] = (
+            hand_moving_average * cur_targets[:, hand_indices]
+            + (1.0 - hand_moving_average) * prev_targets[:, hand_indices]
+        )
+        cur_targets[:, hand_indices] = np.clip(
+            cur_targets[:, hand_indices], Q_LOWER_LIMITS[hand_indices], Q_UPPER_LIMITS[hand_indices]
+        )
+
+    if arm_indices.size:
+        cur_targets[:, arm_indices] = prev_targets[:, arm_indices] + arm_dof_speed_scale * dt * actions[:, :n_arm]
+        cur_targets[:, arm_indices] = np.clip(
+            cur_targets[:, arm_indices], Q_LOWER_LIMITS[arm_indices], Q_UPPER_LIMITS[arm_indices]
+        )
+        cur_targets[:, arm_indices] = (
+            arm_moving_average * cur_targets[:, arm_indices]
+            + (1.0 - arm_moving_average) * prev_targets[:, arm_indices]
+        )
     return cur_targets
 
 
@@ -380,9 +537,17 @@ class MujocoEnvNoRos:
         reset_when_dropped: bool,
         drop_reset_height: float | None,
         seed: int | None,
+        hand_mode: HandMode = "full",
     ):
         self.sim = sim
         self.object_scales = object_scales
+        self.hand_mode = _normalize_hand_mode(hand_mode)
+        active_fingers = HAND_MODE_ACTIVE_FINGERS[self.hand_mode]
+        self.active_joint_indices = _active_joint_indices_for_fingers(active_fingers)
+        self.active_fingertip_indices = _active_fingertip_indices_for_fingers(active_fingers)
+        self.num_actions = int(self.active_joint_indices.shape[0])
+        self.num_observations = _policy_obs_dim(self.num_actions, int(self.active_fingertip_indices.shape[0]))
+        self.reset_joint_pos = _mode_reset_joint_pos(self.hand_mode)
         self.hand_moving_average = hand_moving_average
         self.arm_moving_average = arm_moving_average
         self.hand_dof_speed_scale = hand_dof_speed_scale
@@ -401,6 +566,11 @@ class MujocoEnvNoRos:
         self.drop_reset_height = self.object_init_z if drop_reset_height is None else float(drop_reset_height)
         self.max_object_z_since_reset = self.object_init_z
         self.lifted_object = False
+        print(
+            f"[MuJoCo] hand_mode={self.hand_mode} obs={self.num_observations} actions={self.num_actions} "
+            f"active_fingertips={self.active_fingertip_indices.shape[0]}",
+            flush=True,
+        )
 
     @property
     def sim_steps_per_control_step(self) -> int:
@@ -419,6 +589,8 @@ class MujocoEnvNoRos:
                 flush=True,
             )
         self.sim.reset_scene(goal_object_pos=goal_pos, goal_object_quat_wxyz=goal_quat)
+        self.sim.set_robot_joint_pos_targets(self.reset_joint_pos)
+        self.sim.set_robot_joint_positions(self.reset_joint_pos)
         self.object_init_z = float(self.sim.config.object_start_pos[2])
         self.drop_reset_height = self.object_init_z if self.drop_reset_height is None else self.drop_reset_height
         self.max_object_z_since_reset = self.object_init_z
@@ -456,16 +628,18 @@ class MujocoEnvNoRos:
                 tip_pos + _quat_rotate_xyzw(tip_quat_xyzw, FINGERTIP_OFFSETS[idx : idx + 1])[0]
             )
         fingertip_pos = np.stack(fingertip_pos_list, axis=0)
+        fingertip_pos = fingertip_pos[self.active_fingertip_indices]
         object_keypoints = _compute_keypoints(
             object_pose_w[None, :3], object_pose_w[None, 3:7], self.object_scales[None]
         )
         goal_keypoints = _compute_keypoints(
             goal_object_pose_w[None, :3], goal_object_pose_w[None, 3:7], self.object_scales[None]
         )
+        active_indices = self.active_joint_indices
         obs_dict = {
-            "joint_pos": _unscale(q, Q_LOWER_LIMITS, Q_UPPER_LIMITS),
-            "joint_vel": qd,
-            "prev_action_targets": self.sim.robot_joint_pos_targets[None],
+            "joint_pos": _unscale(q[:, active_indices], Q_LOWER_LIMITS[active_indices], Q_UPPER_LIMITS[active_indices]),
+            "joint_vel": qd[:, active_indices],
+            "prev_action_targets": self.sim.robot_joint_pos_targets[active_indices][None],
             "palm_pos": palm_pos[None],
             "palm_rot": palm_quat_xyzw,
             "object_rot": object_pose_w[None, 3:7],
@@ -476,8 +650,8 @@ class MujocoEnvNoRos:
         }
         obs = np.concatenate([obs_dict[key] for key in self.obs_list], axis=-1)
         obs_tensor = torch.from_numpy(obs).float().to(self.device)
-        if obs_tensor.shape != (1, N_OBS):
-            raise RuntimeError(f"Expected observation shape {(1, N_OBS)}, got {obs_tensor.shape}.")
+        if obs_tensor.shape != (1, self.num_observations):
+            raise RuntimeError(f"Expected observation shape {(1, self.num_observations)}, got {obs_tensor.shape}.")
         return obs_tensor
 
     def step(self, action: torch.Tensor) -> None:
@@ -488,6 +662,7 @@ class MujocoEnvNoRos:
             arm_moving_average=self.arm_moving_average,
             arm_dof_speed_scale=self.hand_dof_speed_scale,
             dt=self.control_dt,
+            active_joint_indices=self.active_joint_indices,
         )
         self.sim.set_robot_joint_pos_targets(joint_pos_targets[0])
         for _ in range(self.sim_steps_per_control_step):
@@ -508,6 +683,7 @@ class MujocoEnvNoRosArgs:
     config_path: Path = DEFAULT_POLICY_DIR / "config.yaml"
     checkpoint_path: Path = DEFAULT_POLICY_DIR / "model.pth"
     object_name: str = "claw_hammer"
+    hand_mode: HandMode = "full"
     enable_viewer: bool = True
     max_steps: int | None = None
     sim_hz: float = 600.0
@@ -666,6 +842,7 @@ def main() -> None:
         raise FileNotFoundError(f"MuJoCo replay scene not found: {MUJOCO_REPLAY_SCENE_PATH}")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    num_observations, num_actions = hand_mode_policy_dims(args.hand_mode)
     sim = MujocoSim(
         MujocoSimConfig(
             enable_viewer=args.enable_viewer,
@@ -680,8 +857,8 @@ def main() -> None:
         )
     )
     policy = RlPlayer(
-        num_observations=N_OBS,
-        num_actions=N_ACT,
+        num_observations=num_observations,
+        num_actions=num_actions,
         config_path=args.config_path,
         checkpoint_path=args.checkpoint_path,
         device=device,
@@ -706,6 +883,7 @@ def main() -> None:
         reset_when_dropped=args.reset_when_dropped,
         drop_reset_height=args.drop_reset_height,
         seed=args.seed,
+        hand_mode=args.hand_mode,
     )
     env.reset()
     policy.reset()

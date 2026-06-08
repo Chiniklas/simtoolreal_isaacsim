@@ -16,7 +16,13 @@ from isaaclab.sensors import ContactSensor
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.math import quat_apply, quat_from_angle_axis, quat_mul, sample_uniform, saturate
 
-from .sharpa_nutscrew_pick_place_screw_env_cfg import FAMILY_PITCHES, NUTSCREW_OBJECT_SCALES, SharpaNutscrewPickPlaceScrewEnvCfg
+from .sharpa_nutscrew_pick_place_screw_env_cfg import (
+    FAMILY_PITCHES,
+    FINGER_NAMES,
+    NUTSCREW_OBJECT_SCALES,
+    SharpaNutscrewPickPlaceScrewEnvCfg,
+    apply_finger_mask,
+)
 from .sharpa_nutscrew_pick_place_screw_utils import compute_joint_pos_targets, unscale
 
 
@@ -27,20 +33,23 @@ def quat_wxyz_to_xyzw(q: torch.Tensor) -> torch.Tensor:
 class SharpaNutscrewPickPlaceScrewEnv(DirectRLEnv):
     """Isaac Lab implementation for the SHARPA nut-screw pick-place-screw task.
 
-    This keeps the reference action count and 140-value observation layout while
-    using Isaac Lab-native articulation/rigid-object state access.
+    The active finger mask determines the action count and observation layout
+    while using Isaac Lab-native articulation/rigid-object state access.
     """
 
     cfg: SharpaNutscrewPickPlaceScrewEnvCfg
 
     def __init__(self, cfg: SharpaNutscrewPickPlaceScrewEnvCfg, render_mode: str | None = None, **kwargs):
+        apply_finger_mask(cfg)
         super().__init__(cfg, render_mode, **kwargs)
         self._apply_object_mass()
 
         self.num_robot_dofs = self.robot.num_joints
         self.actuated_dof_indices = [self.robot.joint_names.index(name) for name in cfg.actuated_joint_names]
+        self.masked_dof_indices = [self.robot.joint_names.index(name) for name in cfg.inactive_joint_names]
         self.num_actions = len(self.actuated_dof_indices)
         self.cfg.num_actions = self.num_actions
+        self.cfg.action_space = self.num_actions
 
         self.actions = torch.zeros(self.num_envs, self.num_actions, device=self.device)
         self.prev_actions = torch.zeros_like(self.actions)
@@ -57,6 +66,7 @@ class SharpaNutscrewPickPlaceScrewEnv(DirectRLEnv):
         self.robot_dof_upper_limits = joint_pos_limits[..., 1][:, self.actuated_dof_indices]
 
         self.robot_start_joint_pos = self.robot.data.default_joint_pos.clone()
+        self._apply_reset_joint_pos_overrides()
         self.robot_start_joint_vel = torch.zeros_like(self.robot_start_joint_pos)
         self.dof_pos_targets[:] = self.robot_start_joint_pos
         self.prev_action_targets[:] = self.robot_start_joint_pos[:, self.actuated_dof_indices]
@@ -89,6 +99,7 @@ class SharpaNutscrewPickPlaceScrewEnv(DirectRLEnv):
         self.frame_since_restart = 0
         num_fingertips = len(self.fingertip_body_indices)
         self.finger_rew_coeffs = torch.ones((self.num_envs, num_fingertips), device=self.device)
+        self.fingertip_reward_scale = float(len(FINGER_NAMES)) / float(num_fingertips)
         self.closest_fingertip_dist = -torch.ones((self.num_envs, num_fingertips), device=self.device)
         self.furthest_hand_dist = -torch.ones(self.num_envs, device=self.device)
         self.closest_keypoint_max_dist = -torch.ones(self.num_envs, device=self.device)
@@ -364,6 +375,19 @@ class SharpaNutscrewPickPlaceScrewEnv(DirectRLEnv):
         self.robot.set_joint_position_target(
             self.dof_pos_targets[:, self.actuated_dof_indices], joint_ids=self.actuated_dof_indices
         )
+        if self.masked_dof_indices:
+            self.robot.set_joint_position_target(
+                self.dof_pos_targets[:, self.masked_dof_indices], joint_ids=self.masked_dof_indices
+            )
+
+    def _apply_reset_joint_pos_overrides(self) -> None:
+        overrides = getattr(self.cfg, "reset_joint_pos_overrides", None) or {}
+        for joint_name, joint_pos in overrides.items():
+            if joint_name not in self.robot.joint_names:
+                available_names = ", ".join(self.robot.joint_names)
+                raise ValueError(f"Reset joint override '{joint_name}' not found. Available joints: {available_names}")
+            joint_idx = self.robot.joint_names.index(joint_name)
+            self.robot_start_joint_pos[:, joint_idx] = float(joint_pos)
 
     def _resolve_body_index(self, body_name: str) -> int:
         matches, matched_names = self.robot.find_bodies(body_name)
@@ -592,7 +616,13 @@ class SharpaNutscrewPickPlaceScrewEnv(DirectRLEnv):
             self.device,
         )
         self.robot.write_joint_state_to_sim(dof_pos, dof_vel, env_ids=env_ids)
-        self.robot.set_joint_position_target(dof_pos[:, self.actuated_dof_indices], env_ids=env_ids, joint_ids=self.actuated_dof_indices)
+        self.robot.set_joint_position_target(
+            dof_pos[:, self.actuated_dof_indices], env_ids=env_ids, joint_ids=self.actuated_dof_indices
+        )
+        if self.masked_dof_indices:
+            self.robot.set_joint_position_target(
+                dof_pos[:, self.masked_dof_indices], env_ids=env_ids, joint_ids=self.masked_dof_indices
+            )
 
         self.dof_pos_targets[env_ids] = dof_pos
         self.prev_action_targets[env_ids] = dof_pos[:, self.actuated_dof_indices]
@@ -883,8 +913,9 @@ class SharpaNutscrewPickPlaceScrewEnv(DirectRLEnv):
         self.closest_fingertip_dist = torch.where(
             self.closest_fingertip_dist < 0.0, self.curr_fingertip_distances, self.closest_fingertip_dist
         )
+        hand_distance = self.curr_fingertip_distances.max(dim=-1).values
         self.furthest_hand_dist = torch.where(
-            self.furthest_hand_dist < 0.0, self.curr_fingertip_distances[:, 0], self.furthest_hand_dist
+            self.furthest_hand_dist < 0.0, hand_distance, self.furthest_hand_dist
         )
         self.keypoint_distances = torch.norm(self.object_keypoints - self.goal_keypoints, dim=-1)
         self.keypoints_max_dist = self.keypoint_distances.max(dim=-1).values
@@ -1306,11 +1337,13 @@ class SharpaNutscrewPickPlaceScrewEnv(DirectRLEnv):
         fingertip_deltas_closest = self.closest_fingertip_dist - self.curr_fingertip_distances
         self.closest_fingertip_dist = torch.minimum(self.closest_fingertip_dist, self.curr_fingertip_distances)
 
-        hand_deltas_furthest = self.furthest_hand_dist - self.curr_fingertip_distances[:, 0]
-        self.furthest_hand_dist = torch.maximum(self.furthest_hand_dist, self.curr_fingertip_distances[:, 0])
+        hand_distance = self.curr_fingertip_distances.max(dim=-1).values
+        hand_deltas_furthest = self.furthest_hand_dist - hand_distance
+        self.furthest_hand_dist = torch.maximum(self.furthest_hand_dist, hand_distance)
 
         fingertip_deltas = torch.clamp(fingertip_deltas_closest, 0.0, 10.0) * self.finger_rew_coeffs
         fingertip_delta_reward = torch.sum(fingertip_deltas, dim=-1) * (~lifted_object)
+        fingertip_delta_reward = fingertip_delta_reward * self.fingertip_reward_scale
 
         hand_delta_penalty = torch.clamp(hand_deltas_furthest, -10.0, 0.0) * (~lifted_object)
         hand_delta_penalty = hand_delta_penalty * self.fingertip_offsets.shape[0]

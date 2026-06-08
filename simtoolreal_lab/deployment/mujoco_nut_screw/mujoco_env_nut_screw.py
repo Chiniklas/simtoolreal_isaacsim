@@ -15,14 +15,14 @@ from simtoolreal_lab.deployment.mujoco.mujoco_env_no_ros import (
     DEFAULT_POLICY_DIR,
     DEFAULT_TARGET_VOLUME_MAXS,
     DEFAULT_TARGET_VOLUME_MINS,
-    N_ACT,
-    N_OBS,
+    HandMode,
     MujocoEnvNoRos,
     MujocoMp4Recorder,
     _make_video_camera,
     _normalize_cli_flag_aliases,
     _policy_obs_list,
     _wait_for_enter_to_start,
+    hand_mode_policy_dims,
 )
 from simtoolreal_lab.deployment.mujoco_nut_screw.mujoco_sim import (
     NUTSCREW_ASSET_DIR,
@@ -43,6 +43,7 @@ class MujocoNutScrewEnvArgs:
     family: str = "M12"
     screw: str = "M12X30"
     nut: str = "M12_nut"
+    hand_mode: HandMode = "full"
     enable_viewer: bool = True
     max_steps: int | None = None
     sim_hz: float = 600.0
@@ -81,6 +82,7 @@ def main() -> None:
         raise FileNotFoundError(f"Checkpoint not found: {args.checkpoint_path}")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    num_observations, num_actions = hand_mode_policy_dims(args.hand_mode)
     sim = MujocoNutScrewSim(
         MujocoNutScrewSimConfig(
             enable_viewer=args.enable_viewer,
@@ -92,8 +94,8 @@ def main() -> None:
         )
     )
     policy = RlPlayer(
-        num_observations=N_OBS,
-        num_actions=N_ACT,
+        num_observations=num_observations,
+        num_actions=num_actions,
         config_path=args.config_path,
         checkpoint_path=args.checkpoint_path,
         device=device,
@@ -120,6 +122,7 @@ def main() -> None:
         reset_when_dropped=args.reset_when_dropped,
         drop_reset_height=args.drop_reset_height,
         seed=args.seed,
+        hand_mode=args.hand_mode,
     )
     env.reset()
     policy.reset()

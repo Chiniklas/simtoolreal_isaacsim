@@ -42,6 +42,24 @@ python -m simtoolreal_lab.deployment.mujoco_nut_screw.mujoco_env_nut_screw \
   --press-enter-to-execute
 ```
 
+Hand modes:
+
+- `--hand-mode full` keeps the original 29-action / 140-observation full-hand contract. This is the default.
+- `--hand-mode tripod` uses thumb, index, and middle finger only: 20 actions / 107 observations.
+- `--hand-mode pinch` uses thumb and index only: 16 actions / 92 observations.
+
+Use a checkpoint trained with the same mode. For example:
+
+```bash
+python -m simtoolreal_lab.deployment.mujoco_nut_screw.mujoco_env_nut_screw \
+  --hand-mode tripod \
+  --checkpoint-path simtoolreal_lab/tasks/sharpa_nutscrew_pick_place_screw/logs/0_2026-06-08_16-14-55/best/model.pth \
+  --family M20 \
+  --screw M20X30 \
+  --nut M20_nut \
+  --press-enter-to-execute
+```
+
 By default the nut uses six invisible box collision proxies so the center hole is
 not filled by a convex mesh collision. The screw uses invisible cylinder proxies
 for the head and shaft. To test different mesh/collision choices, edit the setup
