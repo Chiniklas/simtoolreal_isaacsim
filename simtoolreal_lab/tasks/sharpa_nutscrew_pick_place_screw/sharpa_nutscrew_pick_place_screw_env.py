@@ -12,12 +12,13 @@ from pxr import PhysxSchema, Usd, UsdPhysics
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs import DirectRLEnv
-from isaaclab.sensors import ContactSensor
+from isaaclab.sensors import ContactSensor, ContactSensorCfg
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.math import quat_apply, quat_from_angle_axis, quat_mul, sample_uniform, saturate
 
 from .sharpa_nutscrew_pick_place_screw_env_cfg import (
     FAMILY_PITCHES,
+    FINGER_CONTACT_SENSOR_BODY_NAMES,
     FINGER_NAMES,
     NUTSCREW_OBJECT_SCALES,
     SharpaNutscrewPickPlaceScrewEnvCfg,
@@ -104,6 +105,10 @@ class SharpaNutscrewPickPlaceScrewEnv(DirectRLEnv):
         self.furthest_hand_dist = -torch.ones(self.num_envs, device=self.device)
         self.closest_keypoint_max_dist = -torch.ones(self.num_envs, device=self.device)
         self.closest_keypoint_max_dist_fixed_size = -torch.ones(self.num_envs, device=self.device)
+        self.finger_contact_forces = torch.zeros((self.num_envs, len(self.cfg.active_fingers)), device=self.device)
+        self.finger_nut_contacts = torch.zeros_like(self.finger_contact_forces, dtype=torch.bool)
+        self.nut_contact = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.contact_steps = torch.zeros(self.num_envs, device=self.device)
 
         self.keypoint_offsets = self._make_keypoint_offsets()
         self.grasp_bounding_box_offsets = self._make_grasp_bounding_box_offsets()
@@ -141,6 +146,19 @@ class SharpaNutscrewPickPlaceScrewEnv(DirectRLEnv):
         self.table_contact_sensor = None
         if self.cfg.with_table_force_sensor:
             self.table_contact_sensor = ContactSensor(self.cfg.table_contact_sensor)
+        self.finger_contact_sensors = {}
+        if getattr(self.cfg, "use_finger_contact_sensor", False):
+            nut_filter = [self.cfg.object_cfg.prim_path]
+            for finger in self.cfg.active_fingers:
+                body_name = FINGER_CONTACT_SENSOR_BODY_NAMES[finger]
+                sensor = ContactSensor(
+                    ContactSensorCfg(
+                        prim_path=f"/World/envs/env_.*/Robot/kuka_sharpa/{body_name}",
+                        filter_prim_paths_expr=nut_filter,
+                        debug_vis=bool(getattr(self.cfg, "debug_finger_contact_sensors", False)),
+                    )
+                )
+                self.finger_contact_sensors[finger] = sensor
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
         if self.scene.cfg.replicate_physics:
             self.scene.clone_environments(copy_from_source=False)
@@ -155,6 +173,8 @@ class SharpaNutscrewPickPlaceScrewEnv(DirectRLEnv):
         self.scene.rigid_objects["goal_object"] = self.goal_object
         if self.table_contact_sensor is not None:
             self.scene.sensors["table_contact_sensor"] = self.table_contact_sensor
+        for finger, sensor in self.finger_contact_sensors.items():
+            self.scene.sensors[f"{finger}_nut_contact_sensor"] = sensor
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
@@ -422,11 +442,16 @@ class SharpaNutscrewPickPlaceScrewEnv(DirectRLEnv):
 
         lifting_reward, lift_bonus_reward, lifted_object = self._lifting_reward()
         fingertip_delta_reward, hand_delta_penalty = self._distance_delta_rewards(lifted_object)
-        keypoint_reward = self._keypoint_reward(lifted_object)
+        contact_gate = self.nut_contact
+        if not getattr(self.cfg, "gate_keypoint_on_contact", False):
+            contact_gate = torch.ones_like(self.nut_contact)
+        keypoint_reward = self._keypoint_reward(lifted_object, contact_gate)
 
         keypoints_max_dist = self._reward_keypoints_max_dist()
         keypoint_success_tolerance = self.success_tolerance * self.cfg.keypoint_scale
         near_goal = keypoints_max_dist <= keypoint_success_tolerance
+        if getattr(self.cfg, "gate_keypoint_on_contact", False):
+            near_goal = near_goal & contact_gate
         if self.cfg.force_consecutive_near_goal_steps:
             self.near_goal_steps = (self.near_goal_steps + near_goal.long()) * near_goal.long()
         else:
@@ -447,6 +472,18 @@ class SharpaNutscrewPickPlaceScrewEnv(DirectRLEnv):
         if self.cfg.force_consecutive_near_goal_steps:
             reach_bonus = reached_goal.float() * self.cfg.reach_goal_bonus
 
+        self.contact_steps = torch.where(
+            self.nut_contact,
+            self.contact_steps + 1.0,
+            torch.zeros_like(self.contact_steps),
+        )
+        contact_bonus_reward = (
+            self.cfg.contact_bonus * self.nut_contact.float()
+            + self.cfg.sustained_contact_bonus
+            * self.contact_steps.clamp(max=float(self.cfg.sustained_contact_cap))
+            * self.nut_contact.float()
+        )
+
         reward = (
             fingertip_delta_reward
             + hand_delta_penalty
@@ -454,6 +491,7 @@ class SharpaNutscrewPickPlaceScrewEnv(DirectRLEnv):
             + lift_bonus_reward
             + keypoint_reward
             + reach_bonus
+            + contact_bonus_reward
             + arm_action_penalty
             + hand_action_penalty
             + object_lin_vel_penalty
@@ -470,24 +508,49 @@ class SharpaNutscrewPickPlaceScrewEnv(DirectRLEnv):
             if self.cfg.max_consecutive_successes > 0:
                 self.episode_length_buf[success_env_ids] = 0
 
-        reward_terms = {
-            "fingertip_delta_reward": fingertip_delta_reward.mean(),
-            "hand_delta_penalty": hand_delta_penalty.mean(),
-            "lifting_reward": lifting_reward.mean(),
-            "lift_bonus_reward": lift_bonus_reward.mean(),
-            "keypoint_reward": keypoint_reward.mean(),
-            "reach_bonus": reach_bonus.mean(),
-            "arm_action_penalty": arm_action_penalty.mean(),
-            "hand_action_penalty": hand_action_penalty.mean(),
-            "object_lin_vel_penalty": object_lin_vel_penalty.mean(),
-            "object_ang_vel_penalty": object_ang_vel_penalty.mean(),
-            "total_reward": reward.mean(),
-        }
-        self.extras["log"] = {
-            "keypoints_max_dist": self._reward_keypoints_max_dist().mean(),
-            "object_lift": (0.05 + self.object_pos[:, 2] - self.object_init_pos[:, 2]).mean(),
+        reward_terms = {}
+        if self.cfg.distance_delta_rew_scale != 0.0:
+            reward_terms["fingertip_delta_reward"] = fingertip_delta_reward.mean()
+        if self.cfg.lifting_rew_scale != 0.0:
+            reward_terms["lifting_reward"] = lifting_reward.mean()
+        if self.cfg.lifting_bonus != 0.0:
+            reward_terms["lift_bonus_reward"] = lift_bonus_reward.mean()
+        if self.cfg.keypoint_rew_scale != 0.0:
+            reward_terms["keypoint_reward"] = keypoint_reward.mean()
+        if self.cfg.reach_goal_bonus != 0.0:
+            reward_terms["reach_bonus"] = reach_bonus.mean()
+        if self.cfg.contact_bonus != 0.0 or self.cfg.sustained_contact_bonus != 0.0:
+            reward_terms["contact_bonus_reward"] = contact_bonus_reward.mean()
+        if self.cfg.kuka_actions_penalty_scale != 0.0:
+            reward_terms["arm_action_penalty"] = arm_action_penalty.mean()
+        if self.cfg.hand_actions_penalty_scale != 0.0:
+            reward_terms["hand_action_penalty"] = hand_action_penalty.mean()
+        if self.cfg.object_lin_vel_penalty_scale != 0.0:
+            reward_terms["object_lin_vel_penalty"] = object_lin_vel_penalty.mean()
+        if self.cfg.object_ang_vel_penalty_scale != 0.0:
+            reward_terms["object_ang_vel_penalty"] = object_ang_vel_penalty.mean()
+        reward_terms["total_reward"] = reward.mean()
+
+        task_metrics = {
+            "keypoints_max_dist": keypoints_max_dist.mean(),
             "success_rate": reached_goal.float().mean(),
             "success_tolerance": self.success_tolerance,
+        }
+        if getattr(self.cfg, "use_finger_contact_sensor", False):
+            task_metrics["nut_contact_rate"] = self.nut_contact.float().mean()
+            task_metrics["nut_contact_force"] = self.finger_contact_forces.sum(dim=-1).mean()
+            task_metrics["nut_contact_steps"] = self.contact_steps.mean()
+            for finger_idx, finger in enumerate(self.cfg.active_fingers):
+                task_metrics[f"{finger}_contact_rate"] = self.finger_nut_contacts[:, finger_idx].float().mean()
+                task_metrics[f"{finger}_contact_force"] = self.finger_contact_forces[:, finger_idx].mean()
+        if getattr(self.cfg, "screwing_phase", False):
+            task_metrics["nut_thread_angle"] = self.nut_thread_angle.mean()
+            if self.max_nut_thread_angle > 0.0:
+                task_metrics["nut_thread_progress"] = (self.nut_thread_angle / self.max_nut_thread_angle).mean()
+        elif self.cfg.lifting_rew_scale != 0.0 or self.cfg.lifting_bonus != 0.0:
+            task_metrics["object_lift"] = (0.05 + self.object_pos[:, 2] - self.object_init_pos[:, 2]).mean()
+        self.extras["log"] = {
+            **task_metrics,
             **reward_terms,
         }
         self.extras["reward_terms"] = reward_terms
@@ -636,6 +699,7 @@ class SharpaNutscrewPickPlaceScrewEnv(DirectRLEnv):
         self.furthest_hand_dist[env_ids] = -1.0
         self.closest_keypoint_max_dist[env_ids] = -1.0
         self.closest_keypoint_max_dist_fixed_size[env_ids] = -1.0
+        self.contact_steps[env_ids] = 0.0
         self.prev_episode_successes[env_ids] = self.successes[env_ids]
         self.successes[env_ids] = 0.0
         self.consecutive_successes[env_ids] = 0.0
@@ -936,6 +1000,7 @@ class SharpaNutscrewPickPlaceScrewEnv(DirectRLEnv):
             self.table_contact_force = torch.zeros((self.num_envs, 3), device=self.device)
             self.table_contact_force_smoothed = torch.zeros_like(self.table_contact_force)
             self.max_table_contact_force_norm_smoothed = torch.zeros(self.num_envs, device=self.device)
+        self._update_finger_contact_buffers()
 
     def _update_table_contact_force_buffers(self, contact_data) -> None:
         if getattr(contact_data, "force_matrix_w", None) is not None:
@@ -950,6 +1015,38 @@ class SharpaNutscrewPickPlaceScrewEnv(DirectRLEnv):
         self.max_table_contact_force_norm_smoothed = torch.maximum(
             self.max_table_contact_force_norm_smoothed, table_contact_force_norm_smoothed
         )
+
+    def _update_finger_contact_buffers(self) -> None:
+        if not getattr(self, "finger_contact_sensors", None):
+            self.finger_contact_forces.zero_()
+            self.finger_nut_contacts.zero_()
+            self.nut_contact.zero_()
+            return
+
+        forces = []
+        for finger in self.cfg.active_fingers:
+            contact_data = self.finger_contact_sensors[finger].data
+            force_matrix = getattr(contact_data, "force_matrix_w", None)
+            if force_matrix is not None:
+                force = force_matrix.norm(dim=-1).reshape(self.num_envs, -1).sum(dim=-1)
+            else:
+                force = contact_data.net_forces_w.norm(dim=-1).reshape(self.num_envs, -1).sum(dim=-1)
+            forces.append(force)
+
+        self.finger_contact_forces = torch.stack(forces, dim=-1)
+        self.finger_nut_contacts = self.finger_contact_forces > float(self.cfg.contact_force_threshold)
+        if bool(getattr(self.cfg, "require_all_finger_contacts", True)):
+            self.nut_contact = self.finger_nut_contacts.all(dim=-1)
+        else:
+            required_count = int(getattr(self.cfg, "required_finger_contact_count", 1))
+            required_count = max(1, min(required_count, len(self.cfg.active_fingers)))
+            contact_count = self.finger_nut_contacts.sum(dim=-1)
+            self.nut_contact = contact_count >= required_count
+            required_fingers = tuple(getattr(self.cfg, "required_contact_fingers", ()))
+            for finger in required_fingers:
+                if finger in self.cfg.active_fingers:
+                    finger_idx = self.cfg.active_fingers.index(finger)
+                    self.nut_contact = self.nut_contact & self.finger_nut_contacts[:, finger_idx]
 
     def _compute_reference_observations(self) -> torch.Tensor:
         fingertip_pos_rel_palm = (self.fingertip_pos - self.palm_pos[:, None, :]).reshape(self.num_envs, -1)
@@ -1365,15 +1462,27 @@ class SharpaNutscrewPickPlaceScrewEnv(DirectRLEnv):
         lifting_reward = lifting_reward * self.cfg.lifting_rew_scale
         return lifting_reward, lift_bonus_reward, lifted_object
 
-    def _keypoint_reward(self, lifted_object: torch.Tensor) -> torch.Tensor:
+    def _keypoint_reward(self, lifted_object: torch.Tensor, reward_gate: torch.Tensor | None = None) -> torch.Tensor:
+        if reward_gate is None:
+            reward_gate = torch.ones_like(lifted_object)
+        reward_gate = reward_gate.bool()
         keypoint_deltas = self._reward_closest_keypoint_max_dist() - self._reward_keypoints_max_dist()
-        self.closest_keypoint_max_dist = torch.minimum(self.closest_keypoint_max_dist, self.keypoints_max_dist)
-        self.closest_keypoint_max_dist_fixed_size = torch.minimum(
+        update_gate = lifted_object & reward_gate
+        closest_keypoint_max_dist = torch.minimum(self.closest_keypoint_max_dist, self.keypoints_max_dist)
+        closest_keypoint_max_dist_fixed_size = torch.minimum(
             self.closest_keypoint_max_dist_fixed_size,
             self.keypoints_max_dist_fixed_size,
         )
+        self.closest_keypoint_max_dist = torch.where(
+            update_gate, closest_keypoint_max_dist, self.closest_keypoint_max_dist
+        )
+        self.closest_keypoint_max_dist_fixed_size = torch.where(
+            update_gate,
+            closest_keypoint_max_dist_fixed_size,
+            self.closest_keypoint_max_dist_fixed_size,
+        )
         keypoint_deltas = torch.clamp(keypoint_deltas, 0.0, 100.0)
-        return keypoint_deltas * lifted_object * self.cfg.keypoint_rew_scale
+        return keypoint_deltas * update_gate.float() * self.cfg.keypoint_rew_scale
 
     def _reward_keypoints_max_dist(self) -> torch.Tensor:
         if self.cfg.fixed_size_keypoint_reward:

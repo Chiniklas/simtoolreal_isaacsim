@@ -331,6 +331,18 @@ def _mode_reset_joint_pos(hand_mode: str) -> np.ndarray:
     return q
 
 
+def reset_joint_pos_from_isaac_overrides(hand_mode: str, overrides: dict[str, float] | None) -> np.ndarray:
+    q = _mode_reset_joint_pos(hand_mode)
+    if not overrides:
+        return q
+    for isaac_name, joint_pos in overrides.items():
+        mujoco_name = ISAAC_TO_MUJOCO_JOINT_NAMES.get(isaac_name)
+        if mujoco_name is None:
+            continue
+        q[JOINT_NAMES.index(mujoco_name)] = float(joint_pos)
+    return q
+
+
 def _compute_keypoints(pos: np.ndarray, quat_xyzw: np.ndarray, scales: np.ndarray) -> np.ndarray:
     offsets = KEYPOINT_OFFSETS[None] * 0.04 * 1.5 * 0.5 * scales[:, None]
     keypoints = np.zeros((pos.shape[0], 4, 3), dtype=np.float32)
@@ -538,6 +550,7 @@ class MujocoEnvNoRos:
         drop_reset_height: float | None,
         seed: int | None,
         hand_mode: HandMode = "full",
+        reset_joint_pos: np.ndarray | None = None,
     ):
         self.sim = sim
         self.object_scales = object_scales
@@ -547,7 +560,9 @@ class MujocoEnvNoRos:
         self.active_fingertip_indices = _active_fingertip_indices_for_fingers(active_fingers)
         self.num_actions = int(self.active_joint_indices.shape[0])
         self.num_observations = _policy_obs_dim(self.num_actions, int(self.active_fingertip_indices.shape[0]))
-        self.reset_joint_pos = _mode_reset_joint_pos(self.hand_mode)
+        self.reset_joint_pos = (
+            _mode_reset_joint_pos(self.hand_mode) if reset_joint_pos is None else np.asarray(reset_joint_pos, dtype=np.float64)
+        )
         self.hand_moving_average = hand_moving_average
         self.arm_moving_average = arm_moving_average
         self.hand_dof_speed_scale = hand_dof_speed_scale
@@ -606,6 +621,26 @@ class MujocoEnvNoRos:
         fell_below_table = object_z < TABLE_TOP_Z - TABLE_FALL_RESET_MARGIN
         self.lifted_object = self.lifted_object or armed_by_lift
         return dropped_after_lift or fell_below_table
+
+    def palm_pos(self) -> np.ndarray:
+        wrist_pos, wrist_quat_wxyz = self.sim.get_body_pose("link7")
+        palm_quat_xyzw = _quat_wxyz_to_xyzw(wrist_quat_wxyz)[None]
+        return wrist_pos + _quat_rotate_xyzw(palm_quat_xyzw, PALM_OFFSET[None])[0]
+
+    def should_reset_after_hand_drift(
+        self,
+        max_palm_object_distance: float | None,
+        min_palm_z: float | None,
+    ) -> tuple[bool, str]:
+        palm_pos = self.palm_pos()
+        object_pos = self.sim.get_sim_state()["object_pos"]
+        if max_palm_object_distance is not None:
+            distance = float(np.linalg.norm(palm_pos - object_pos))
+            if distance > max_palm_object_distance:
+                return True, f"palm-object distance {distance:.3f} > {max_palm_object_distance:.3f}"
+        if min_palm_z is not None and float(palm_pos[2]) < min_palm_z:
+            return True, f"palm z {float(palm_pos[2]):.3f} < {min_palm_z:.3f}"
+        return False, ""
 
     def compute_observation(self) -> torch.Tensor:
         sim_state = self.sim.get_sim_state()

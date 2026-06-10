@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import tyro
+import yaml
 
 from simtoolreal_lab.deployment.mujoco.mujoco_env_no_ros import (
     DEFAULT_OBS_LIST,
@@ -23,6 +24,7 @@ from simtoolreal_lab.deployment.mujoco.mujoco_env_no_ros import (
     _policy_obs_list,
     _wait_for_enter_to_start,
     hand_mode_policy_dims,
+    reset_joint_pos_from_isaac_overrides,
 )
 from simtoolreal_lab.deployment.mujoco_nut_screw.mujoco_sim import (
     NUTSCREW_ASSET_DIR,
@@ -48,12 +50,13 @@ class MujocoNutScrewEnvArgs:
     max_steps: int | None = None
     sim_hz: float = 600.0
     control_hz: float = 60.0
+    reset_interval_steps: int | None = 1000
+    hand_drift_reset_distance: float | None = 0.45
+    hand_min_z: float | None = 0.50
     randomize_goal: bool = False
     target_volume_mins: tuple[float, float, float] = DEFAULT_TARGET_VOLUME_MINS
     target_volume_maxs: tuple[float, float, float] = DEFAULT_TARGET_VOLUME_MAXS
     randomize_goal_rotation: bool = True
-    reset_when_dropped: bool = True
-    drop_reset_height: float | None = None
     seed: int | None = None
     visualize_keypoints: bool = False
     visualize_grasp_bounding_box: bool = False
@@ -68,6 +71,20 @@ class MujocoNutScrewEnvArgs:
 
 def _default_name_if_blank(value: str, fallback: str) -> str:
     return fallback if value == "" else value
+
+
+def _trained_reset_joint_pos(config_path: Path, hand_mode: HandMode) -> np.ndarray:
+    with config_path.open() as f:
+        cfg = yaml.safe_load(f)
+    env_cfg = cfg.get("env_cfg", {}) if isinstance(cfg, dict) else {}
+    overrides = env_cfg.get("reset_joint_pos_overrides", {})
+    q = reset_joint_pos_from_isaac_overrides(hand_mode, overrides)
+    print(
+        f"[MuJoCo] Loaded reset pose from {config_path} "
+        f"({len(overrides) if isinstance(overrides, dict) else 0} Isaac joint overrides).",
+        flush=True,
+    )
+    return q
 
 
 def main() -> None:
@@ -89,6 +106,7 @@ def main() -> None:
             sim_dt=1.0 / args.sim_hz,
             scene_xml_path=args.scene_xml_path,
             family=family,
+            screw_name=args.screw,
             nut_name=nut_name,
             asset_root=args.asset_root,
         )
@@ -104,6 +122,7 @@ def main() -> None:
     if obs_list != DEFAULT_OBS_LIST:
         print(f"[MuJoCo] Using policy obs list from config: {obs_list}", flush=True)
     object_scales = nut_screw_object_scales(args.asset_root, family, nut_name)
+    reset_joint_pos = _trained_reset_joint_pos(args.config_path, args.hand_mode)
     env = MujocoEnvNoRos(
         sim=sim,
         object_scales=object_scales,
@@ -119,10 +138,13 @@ def main() -> None:
         target_volume_mins=args.target_volume_mins,
         target_volume_maxs=args.target_volume_maxs,
         randomize_goal_rotation=args.randomize_goal_rotation,
-        reset_when_dropped=args.reset_when_dropped,
-        drop_reset_height=args.drop_reset_height,
+        # Nut-screw replay keeps the nut constrained on the bolt. Do not use the
+        # generic object lift/drop reset semantics here.
+        reset_when_dropped=False,
+        drop_reset_height=None,
         seed=args.seed,
         hand_mode=args.hand_mode,
+        reset_joint_pos=reset_joint_pos,
     )
     env.reset()
     policy.reset()
@@ -151,8 +173,19 @@ def main() -> None:
             obs = env.compute_observation()
             action = policy.get_normalized_action(obs, deterministic_actions=True)
             env.step(action)
-            if env.should_reset_after_drop():
-                print("[MuJoCo] Nut dropped after lift; resetting nut-screw scene.", flush=True)
+            reset_reason = None
+            if args.reset_interval_steps is not None and args.reset_interval_steps > 0:
+                if step > 0 and step % args.reset_interval_steps == 0:
+                    reset_reason = f"periodic reset at step {step}"
+            if reset_reason is None:
+                should_reset, drift_reason = env.should_reset_after_hand_drift(
+                    args.hand_drift_reset_distance,
+                    args.hand_min_z,
+                )
+                if should_reset:
+                    reset_reason = drift_reason
+            if reset_reason is not None:
+                print(f"[MuJoCo] Resetting nut-screw scene: {reset_reason}.", flush=True)
                 env.reset()
                 policy.reset()
             if recorder is not None:

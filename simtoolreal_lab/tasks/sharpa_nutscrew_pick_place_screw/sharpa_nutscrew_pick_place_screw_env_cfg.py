@@ -45,6 +45,16 @@ FINGERTIP_BODY_NAMES_BY_FINGER = {
     "ring": "left_ring_DP",
     "pinky": "left_pinky_DP",
 }
+FINGER_CONTACT_SENSOR_BODY_NAMES = {
+    # The elastomer pads are fixed child links in the local USD and do not carry
+    # PhysX contact reporter API. Attach sensors to the reporting distal links;
+    # the filtered force still measures finger<->nut contact only.
+    "thumb": "left_thumb_DP",
+    "index": "left_index_DP",
+    "middle": "left_middle_DP",
+    "ring": "left_ring_DP",
+    "pinky": "left_pinky_DP",
+}
 FINGERTIP_OFFSET_BY_FINGER = {
     finger: (0.02, 0.002, 0.0) for finger in FINGER_NAMES
 }
@@ -512,6 +522,11 @@ def configure_screwing_phase(cfg: "SharpaNutscrewPickPlaceScrewEnvCfg") -> None:
     cfg.table_reset_z_range = 0.0
     cfg.object_z_low_reset_threshold = NUTSCREW_TABLE_TOP_Z - 0.05
     cfg.force_scale = 0.0
+    # Screwing starts with the nut already on the bolt, so do not keep the
+    # upstream pick-place lift gate between grasping and goal/keypoint rewards.
+    cfg.lifting_rew_scale = 0.0
+    cfg.lifting_bonus = 0.0
+    cfg.lifting_bonus_threshold = -1.0
 
 
 DEFAULT_SCREWING_FAMILY = "M20"
@@ -669,6 +684,16 @@ class SharpaNutscrewPickPlaceScrewEnvCfg(DirectRLEnvCfg):
     fall_penalty = 0.0
     object_lin_vel_penalty_scale = 0.0
     object_ang_vel_penalty_scale = 0.0
+    use_finger_contact_sensor = False
+    debug_finger_contact_sensors = False
+    contact_force_threshold = 0.5
+    require_all_finger_contacts = True
+    required_finger_contact_count = 1
+    required_contact_fingers: tuple[str, ...] = ()
+    gate_keypoint_on_contact = False
+    contact_bonus = 0.0
+    sustained_contact_bonus = 0.0
+    sustained_contact_cap = 50
     object_z_low_reset_threshold = NUTSCREW_TABLE_TOP_Z - 0.05
     hand_far_from_object_threshold = 1.5
     with_table_force_sensor = True

@@ -35,9 +35,11 @@ env_cfg:
   goal_sampling_type: delta
   delta_goal_distance: 0.1
   delta_rotation_degrees: 90.0
-  lifting_rew_scale: 20.0
-  lifting_bonus: 300.0
-  lifting_bonus_threshold: 0.15
+  # Nut screwing starts with the nut already on the bolt, so keep the
+  # downstream keypoint/screwing reward active without a lift gate.
+  lifting_rew_scale: 0.0
+  lifting_bonus: 0.0
+  lifting_bonus_threshold: -1.0
   keypoint_rew_scale: 200.0
   distance_delta_rew_scale: 50.0
   reach_goal_bonus: 1000.0

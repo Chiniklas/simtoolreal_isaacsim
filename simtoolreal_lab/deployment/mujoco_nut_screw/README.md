@@ -14,6 +14,10 @@ python simtoolreal_lab/tasks/sharpa_nutscrew_pick_place_screw/tests/screw_genera
   --overwrite
 ```
 
+At reset, the nut and green goal nut are initialized from the selected
+`--family/--screw/--nut` mesh bounds so the nut top is aligned with the screw
+tip, matching the Isaac screwing-phase reset convention.
+
 Quick scene-only viewer:
 
 ```bash

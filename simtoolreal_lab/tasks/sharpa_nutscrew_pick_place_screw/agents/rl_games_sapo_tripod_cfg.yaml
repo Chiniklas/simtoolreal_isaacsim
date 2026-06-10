@@ -83,6 +83,15 @@ env_cfg:
   fall_penalty: 0.0
   object_lin_vel_penalty_scale: 0.0
   object_ang_vel_penalty_scale: 0.0
+  use_finger_contact_sensor: True
+  contact_force_threshold: 0.02
+  require_all_finger_contacts: False
+  required_finger_contact_count: 2
+  required_contact_fingers: [thumb]
+  gate_keypoint_on_contact: True
+  contact_bonus: 0.2
+  sustained_contact_bonus: 0.002
+  sustained_contact_cap: 50
   object_z_low_reset_threshold: 0.1
   hand_far_from_object_threshold: 1.5
   with_table_force_sensor: True
