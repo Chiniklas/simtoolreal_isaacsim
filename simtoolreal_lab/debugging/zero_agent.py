@@ -48,12 +48,15 @@ import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import parse_env_cfg
 
 import simtoolreal_lab.tasks.sharpa_nutscrew_pick_place_screw.gym_setup  # noqa: F401
+import simtoolreal_lab.tasks.sharpa_forgeUltra.gym_setup  # noqa: F401
 import simtoolreal_lab.tasks.simtoolreal_sharpa.gym_setup  # noqa: F401
 
 
 def apply_object_selection(env_cfg) -> None:
     cfg_module = importlib.import_module(env_cfg.__class__.__module__)
-    cfg_module.apply_object_selection(env_cfg)
+    apply_selection = getattr(cfg_module, "apply_object_selection", None)
+    if apply_selection is not None:
+        apply_selection(env_cfg)
 
 
 def main():
@@ -63,11 +66,11 @@ def main():
         num_envs=args_cli.num_envs,
         use_fabric=not args_cli.disable_fabric,
     )
-    if args_cli.object is not None:
+    if args_cli.object is not None and hasattr(env_cfg, "object_name"):
         env_cfg.object_name = args_cli.object
-    if args_cli.visualize_keypoints:
+    if args_cli.visualize_keypoints and hasattr(env_cfg, "debug_keypoints"):
         env_cfg.debug_keypoints = True
-    if args_cli.visualize_grasp_bounding_box:
+    if args_cli.visualize_grasp_bounding_box and hasattr(env_cfg, "debug_grasp_bounding_box"):
         env_cfg.debug_grasp_bounding_box = True
     apply_object_selection(env_cfg)
 

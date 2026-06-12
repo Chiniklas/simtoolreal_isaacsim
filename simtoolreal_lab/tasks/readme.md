@@ -7,6 +7,74 @@ new screwing-focused task:
 sharpa_nutscrew_pick_place_screw
 ```
 
+## RL-Games Backends
+
+The SAPO and vanilla PPO paths use separate launchers and separate RL-Games
+implementations:
+
+```text
+train_rl_games.py / play_rl_games.py
+    SimToolReal + SAPO tasks
+    simtoolreal_lab/rl_games vendored fork
+
+train_forge_rl_games.py / play_forge_rl_games.py
+    Forge KUKA tasks
+    installed upstream rl-games package
+```
+
+Do not use the SAPO launchers for `Isaac-Forge-*-Kuka*` tasks.
+
+## Forge Run11 Reproduction
+
+The transplanted `sharpa_forgeUltra` task contains the run11 environment,
+asset, and vanilla PPO configuration from reference commit `49561c2`.
+Run11 used:
+
+```text
+task:       Isaac-Forge-NutThread-KukaPinchThread-v0
+seed:       0
+num_envs:   128
+algorithm:  upstream RL-Games vanilla PPO
+recipe:     rl_games_ppo_cfg_nut_thread.yaml
+result:     about 82% success at epoch 74, peak 85.9% at epoch 73
+```
+
+Launch an explicit reproduction run with:
+
+```bash
+PYTHONPATH=. conda run -n simtoolreal python \
+  simtoolreal_lab/train_forge_rl_games.py \
+  --task Isaac-Forge-NutThread-KukaPinchThread-v0 \
+  --num_envs 128 \
+  --seed 0 \
+  --device cuda:0 \
+  --headless \
+  --debug_rewards \
+  --run_name run11-repro
+```
+
+Logs and checkpoints are written under:
+
+```text
+logs/rl_games/ForgeKuka/KukaForge-nutthread-run11-repro-<timestamp>/
+```
+
+Replay a checkpoint with:
+
+```bash
+PYTHONPATH=. conda run -n simtoolreal python \
+  simtoolreal_lab/play_forge_rl_games.py \
+  --task Isaac-Forge-NutThread-KukaPinchThread-v0 \
+  --checkpoint logs/rl_games/ForgeKuka/<run>/nn/ForgeKuka.pth \
+  --device cuda:0
+```
+
+The reference ran Isaac Lab `v2.3.2` with Isaac Sim `5.1.0`. The `simtoolreal`
+environment currently uses Isaac Lab `v2.2.1` with Isaac Sim `5.0.0`, so the
+learning curve is not expected to be bit-for-bit identical. A one-epoch
+vanilla-PPO smoke run succeeds on this stack, including the run11 contact/reward
+diagnostics, but the full convergence result still needs to be reproduced.
+
 ## `sharpa_nutscrew_pick_place_screw`
 
 Current purpose: isolate the screwing/unscrewing phase for the SHARPA hand and

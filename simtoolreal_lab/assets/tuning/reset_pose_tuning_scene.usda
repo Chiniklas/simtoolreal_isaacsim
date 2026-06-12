@@ -1,0 +1,97 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "World"
+{
+    def Xform "envs"
+    {
+        def Xform "env_0"
+        {
+            def Xform "Robot" (
+                prepend references = @../kuka_sharpa/kuka_sharpa.usd@
+            )
+            {
+                # Training relative pose from KUKA_SHARPA_CFG.init_state.pos.
+                double3 xformOp:translate = (0, 0.8, 0)
+                quatf xformOp:orient = (1, 0, 0, 0)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient"]
+            }
+
+            def Cube "table"
+            {
+                double size = 1
+                color3f[] primvars:displayColor = [(0.82, 0.56, 0.35)] (
+                    interpolation = "constant"
+                )
+                # ForgeKuka-aligned table proxy: top at z=0.05, centered at x=0.55.
+                double3 xformOp:translate = (0.55, 0, 0)
+                double3 xformOp:scale = (0.75, 0.4, 0.1)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Xform "fixed_screw" (
+                prepend references = @../nutscrew_generated/M16/M16X30.usd@
+            )
+            {
+                # M16X30 generated screw origin for table top z=0.05.
+                double3 xformOp:translate = (0.6, 0, 0.066)
+                quatf xformOp:orient = (1, 0, 0, 0)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient"]
+            }
+
+            def Xform "object" (
+                prepend references = @../nutscrew_generated/M16/M16_nut.usd@
+            )
+            {
+                # M16 nut center for the top-of-thread screwing pose.
+                double3 xformOp:translate = (0.6, 0, 0.0895)
+                quatf xformOp:orient = (1, 0, 0, 0)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient"]
+            }
+
+            def Sphere "screw_axis_marker"
+            {
+                double radius = 0.01
+                color3f[] primvars:displayColor = [(0.05, 0.45, 1.0)] (
+                    interpolation = "constant"
+                )
+                double3 xformOp:translate = (0.6, 0, 0.05)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+            }
+
+            def Sphere "robot_base_marker"
+            {
+                double radius = 0.015
+                color3f[] primvars:displayColor = [(1.0, 0.1, 0.1)] (
+                    interpolation = "constant"
+                )
+                double3 xformOp:translate = (0, 0.8, 0)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+            }
+        }
+    }
+
+    def Xform "Lights"
+    {
+        def DistantLight "Key"
+        {
+            float intensity = 1200
+            float angle = 0.5
+            double3 xformOp:rotateXYZ = (-45, 0, 35)
+            uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+        }
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 28
+        float2 clippingRange = (0.01, 1000)
+        double3 xformOp:translate = (1.2, -1.1, 0.95)
+        double3 xformOp:rotateXYZ = (60, 0, 42)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+}

@@ -154,7 +154,18 @@ def _critic_state_dim(num_actions: int, num_fingertips: int) -> int:
 
 def apply_finger_mask(cfg) -> None:
     active_fingers = _normalize_active_fingers(getattr(cfg, "active_fingers", DEFAULT_ACTIVE_FINGERS))
-    actuated_joint_names, inactive_joint_names = _finger_masked_joint_names(active_fingers)
+    actuated_override = getattr(cfg, "actuated_joint_names_override", None)
+    if actuated_override is None:
+        actuated_joint_names, inactive_joint_names = _finger_masked_joint_names(active_fingers)
+    else:
+        actuated_joint_names = tuple(actuated_override)
+        unknown = sorted(set(actuated_joint_names) - set(KUKA_SHARPA_JOINT_NAMES))
+        if unknown:
+            raise ValueError(f"Unknown actuated_joint_names_override joints: {unknown}")
+        actuated_set = set(actuated_joint_names)
+        inactive_joint_names = tuple(
+            joint_name for joint_name in KUKA_SHARPA_JOINT_NAMES if joint_name not in actuated_set
+        )
     fingertip_body_names = _fingertip_body_names(active_fingers)
 
     cfg.active_fingers = active_fingers

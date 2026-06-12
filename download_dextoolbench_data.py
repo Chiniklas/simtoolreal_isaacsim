@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
-from reference.dextoolbench.metadata import DEXTOOLBENCH_DATA_STRUCTURE
+from reference.simtoolreal.dextoolbench.metadata import DEXTOOLBENCH_DATA_STRUCTURE
 
 import requests
 import tyro

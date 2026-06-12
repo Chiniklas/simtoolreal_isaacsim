@@ -1,4 +1,4 @@
-"""Play Isaac Lab RL-Games checkpoints with the vendored reference RL-Games fork."""
+"""Play SimToolReal checkpoints with the vendored SAPO RL-Games fork."""
 
 from __future__ import annotations
 
@@ -21,7 +21,6 @@ parser.add_argument("--object", type=str, default=None, help="Object or asset na
 parser.add_argument("--debug_keypoints", action="store_true", default=False, help="Visualize object and goal keypoints.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
-
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
@@ -42,7 +41,6 @@ from isaaclab_tasks.utils import load_cfg_from_registry, parse_env_cfg
 from isaaclab_rl.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper
 
 import simtoolreal_lab.tasks.sharpa_nutscrew_pick_place_screw.gym_setup  # noqa: F401
-import simtoolreal_lab.tasks.sharpa_nutscrew_forge.gym_setup  # noqa: F401
 import simtoolreal_lab.tasks.simtoolreal_sharpa.gym_setup  # noqa: F401
 
 
@@ -70,7 +68,9 @@ class SimToolRealRlGamesGpuEnv(RlGamesGpuEnv):
 
 def _apply_object_selection(env_cfg) -> None:
     cfg_module = importlib.import_module(env_cfg.__class__.__module__)
-    cfg_module.apply_object_selection(env_cfg)
+    apply_selection = getattr(cfg_module, "apply_object_selection", None)
+    if apply_selection is not None:
+        apply_selection(env_cfg)
 
 
 def _set_cfg_value(cfg, key_path: str, value) -> None:
@@ -149,8 +149,9 @@ def _player_obs(obs: torch.Tensor | dict[str, torch.Tensor], player: BasePlayer)
         obs = obs["obs"]
     if obs.dim() == 3 and obs.shape[0] == 1:
         obs = obs.squeeze(0)
-    if player.intr_reward_coef_embd is not None:
-        obs = torch.cat([obs, player.intr_reward_coef_embd], dim=1)
+    intr_reward_coef_embd = getattr(player, "intr_reward_coef_embd", None)
+    if intr_reward_coef_embd is not None:
+        obs = torch.cat([obs, intr_reward_coef_embd], dim=1)
     return obs
 
 
@@ -187,11 +188,12 @@ def main():
     if args_cli.disable_fabric:
         env_cfg.sim.use_fabric = False
     checkpoint_success_tolerance = _checkpoint_success_tolerance(resume_path)
-    if checkpoint_success_tolerance is not None:
+    if checkpoint_success_tolerance is not None and hasattr(env_cfg, "success_tolerance"):
         env_cfg.success_tolerance = checkpoint_success_tolerance
-    if args_cli.object is not None:
+    if args_cli.object is not None and hasattr(env_cfg, "object_name"):
         env_cfg.object_name = args_cli.object
-    env_cfg.debug_keypoints = args_cli.debug_keypoints
+    if hasattr(env_cfg, "debug_keypoints"):
+        env_cfg.debug_keypoints = args_cli.debug_keypoints
     _apply_object_selection(env_cfg)
     agent_cfg["params"]["load_checkpoint"] = True
     agent_cfg["params"]["load_path"] = resume_path

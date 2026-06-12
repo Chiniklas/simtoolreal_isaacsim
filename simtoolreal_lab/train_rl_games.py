@@ -1,4 +1,4 @@
-"""Train Isaac Lab tasks with the vendored reference RL-Games fork."""
+"""Train SimToolReal tasks with the vendored SAPO RL-Games fork."""
 
 from __future__ import annotations
 
@@ -50,8 +50,6 @@ if args_cli.video:
     args_cli.enable_cameras = True
 if args_cli.task in {"sharpa_nutscrew_pick_place_screw", "sharpa_nutscrew_pick_place_screw_pretrain_like"}:
     task_output_dir = "sharpa_nutscrew_pick_place_screw"
-elif args_cli.task == "sharpa_nutscrew_forge":
-    task_output_dir = "sharpa_nutscrew_forge"
 else:
     task_output_dir = "simtoolreal_sharpa"
 TASK_OUTPUT_ROOT = pathlib.Path(__file__).resolve().parent / "tasks" / task_output_dir
@@ -81,7 +79,6 @@ from isaaclab_rl.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import simtoolreal_lab.tasks.sharpa_nutscrew_pick_place_screw.gym_setup  # noqa: F401
-import simtoolreal_lab.tasks.sharpa_nutscrew_forge.gym_setup  # noqa: F401
 import simtoolreal_lab.tasks.simtoolreal_sharpa.gym_setup  # noqa: F401
 
 
@@ -91,8 +88,6 @@ TASKS_DIR = pathlib.Path(__file__).resolve().parent / "tasks"
 def _task_agents_dir(task_name: str | None) -> pathlib.Path:
     if task_name in {"sharpa_nutscrew_pick_place_screw", "sharpa_nutscrew_pick_place_screw_pretrain_like"}:
         return TASKS_DIR / "sharpa_nutscrew_pick_place_screw" / "agents"
-    if task_name == "sharpa_nutscrew_forge":
-        return TASKS_DIR / "sharpa_nutscrew_forge" / "agents"
     return TASKS_DIR / "simtoolreal_sharpa" / "agents"
 
 
@@ -112,7 +107,9 @@ def _load_agent_cfg_override(agent_cfg_path: str) -> dict:
 
 def _apply_object_selection(env_cfg) -> None:
     cfg_module = importlib.import_module(env_cfg.__class__.__module__)
-    cfg_module.apply_object_selection(env_cfg)
+    apply_selection = getattr(cfg_module, "apply_object_selection", None)
+    if apply_selection is not None:
+        apply_selection(env_cfg)
 
 
 def _set_cfg_value(cfg, key_path: str, value):
@@ -224,9 +221,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     _apply_cli_config_overrides(env_cfg, agent_cfg)
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
-    if args_cli.visualize_keypoints:
+    if args_cli.visualize_keypoints and hasattr(env_cfg, "debug_keypoints"):
         env_cfg.debug_keypoints = True
-    if args_cli.visualize_grasp_bounding_box:
+    if args_cli.visualize_grasp_bounding_box and hasattr(env_cfg, "debug_grasp_bounding_box"):
         env_cfg.debug_grasp_bounding_box = True
     _apply_object_selection(env_cfg)
     agent_cfg["params"]["seed"] = args_cli.seed if args_cli.seed is not None else agent_cfg["params"]["seed"]
@@ -256,8 +253,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     env_cfg.seed = agent_cfg["params"]["seed"]
     log_root_path = str((TASK_OUTPUT_ROOT / "logs").resolve())
-    # The reference SAPO RL-Games fork parses the leading token as policy_idx.
-    log_dir = agent_cfg["params"]["config"].get("full_experiment_name", f"0_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}")
+    # The SAPO fork parses the leading token as policy_idx.
+    log_dir = agent_cfg["params"]["config"].get(
+        "full_experiment_name", f"0_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
+    )
     agent_cfg["params"]["config"]["train_dir"] = log_root_path
     agent_cfg["params"]["config"]["full_experiment_name"] = log_dir
     dump_yaml(os.path.join(log_root_path, log_dir, "params", "env.yaml"), env_cfg)

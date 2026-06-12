@@ -12,13 +12,11 @@ __pycache__/
 .codex/
 
 # Training/evaluation outputs
-/logs/
+**/logs/
 /outputs/
 /runs/
 /wandb/
 /eval_results/
-simtoolreal_lab/tasks/simtoolreal_sharpa/logs/
-simtoolreal_lab/tasks/sharpa_nutscrew_pick_place_screw/logs/
 
 # Local downloaded policies/checkpoints
 simtoolreal_lab/pretrained_policy/
@@ -49,6 +47,12 @@ simtoolreal_lab/assets/kuka_sharpa/**/*.usd
 /logs/
 .catkin_workspace
 assets/
+!simtoolreal_lab/assets/
+simtoolreal_lab/assets/*
+!simtoolreal_lab/assets/kuka_sharpa_forge/
+!simtoolreal_lab/assets/kuka_sharpa_forge/**
+!simtoolreal_lab/assets/tuning/
+!simtoolreal_lab/assets/tuning/**
 dextoolbench/
 pretrained_policy/
 outputs/
